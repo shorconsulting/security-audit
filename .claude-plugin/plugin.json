@@ -1,7 +1,7 @@
 {
   "name": "security-audit",
   "displayName": "Security Audit",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Weekly read-only security audit of this Mac, its SSH keys (passphraseless keys and what they open), local checkouts (committed secrets, malicious or vulnerable dependencies, npm worm indicators), every GitHub org and repo you can see (2FA, Dependabot, branch protection, deploy keys, webhooks, runners, risky Actions workflows), every server in ~/.ssh/config (sshd settings, new authorized keys, firewall, patches, persistence, miners) and Claude Code itself (plugins, hooks, MCP servers, over-broad permissions, hidden prompt injection). Reports what is new since last week and the fix for each finding.",
   "author": {
     "name": "David Shor",

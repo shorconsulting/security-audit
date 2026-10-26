@@ -121,5 +121,44 @@ class DiffTests(unittest.TestCase):
         self.assertEqual(len(sa.finalize(a)["findings"]), 1)
 
 
+class FixTests(unittest.TestCase):
+    def test_pin_text_pins_third_party_only(self):
+        import security_fix as sf
+        sha_ = "a" * 40
+        text = ("steps:\n"
+                "  - uses: actions/checkout@v4\n"
+                "  - uses: cloudflare/wrangler-action@v3\n"
+                "    with: {x: 1}\n"
+                "  - uses: 'gradle/actions/setup-gradle@v4'   # build cache\n"
+                "  - uses: ./local-action\n"
+                "  - uses: tj-actions/changed-files@%s\n" % ("b" * 40))
+        seen = []
+        new, pinned = sf.pin_text(text, lambda repo, ref: seen.append((repo, ref)) or sha_)
+        self.assertEqual(seen, [("cloudflare/wrangler-action", "v3"), ("gradle/actions", "v4")])
+        self.assertIn("  - uses: cloudflare/wrangler-action@%s # v3\n" % sha_, new)
+        self.assertIn("  - uses: 'gradle/actions/setup-gradle@%s'   # build cache\n" % sha_, new)
+        self.assertIn("  - uses: actions/checkout@v4\n", new)
+        self.assertEqual(len(pinned), 2)
+
+    def test_unresolved_tag_is_left_alone(self):
+        import security_fix as sf
+        text = "  - uses: some/action@v1\n"
+        self.assertEqual(sf.pin_text(text, lambda r, ref: None), (text, []))
+
+    def test_attach_fixes_moves_fixed_out_of_counts(self):
+        a = audit()
+        a.add("github", "medium", "dependabot-off", "o/r", "t")
+        a.add("github", "medium", "unpinned-action", "o/r/.github/workflows/x.yml", "t")
+        rep = sa.finalize(a)
+        sa.attach_fixes(rep, [
+            {"id": "github:dependabot-off:o/r", "kind": "setting", "status": "fixed", "detail": "d", "url": ""},
+            {"id": "github:unpinned-action:o/r/.github/workflows/x.yml", "kind": "pr", "status": "pr-opened",
+             "detail": "d", "url": "https://github.com/o/r/pull/1"}])
+        self.assertEqual([f["check"] for f in rep["fixed"]], ["dependabot-off"])
+        self.assertEqual(rep["counts"]["medium"], 1)
+        self.assertEqual(rep["findings"][0]["remedy"]["status"], "pr-opened")
+        self.assertIn("pull/1", sa.render_html(rep))
+
+
 if __name__ == "__main__":
     unittest.main()

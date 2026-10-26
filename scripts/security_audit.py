@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """Weekly security audit across this Mac, its SSH keys, local checkouts, GitHub orgs, servers and Claude plugins.
 
-Read-only: it never changes a setting, a file outside its own state folder, a server or GitHub. Every finding carries
-a severity, a stable id (so a week-to-week diff can say what is new) and the fix. Accepted risks are listed in
-~/.security-audit/accepted.json and reported apart from the open findings.
+The scan is read-only: it never changes a setting, a file outside its own state folder, a server or GitHub. Every
+finding carries a severity, a stable id (so a week-to-week diff can say what is new) and the fix. Accepted risks are
+listed in ~/.security-audit/accepted.json and reported apart from the open findings.
+
+With --fix, the scan then makes the GitHub fixes that cannot break a repository (security_fix.py lists them):
+settings that only add alerts or block force pushes, and pull requests that pin actions. It never merges.
 
 Usage:
-    security_audit.py scan [--only AREA,...] [--skip AREA,...] [--quick] [--full-history] [--lynis]
+    security_audit.py scan [--only AREA,...] [--skip AREA,...] [--quick] [--full-history] [--lynis] [--fix]
                            [--html PAGE] [--json OUT] [--md OUT]
+    security_audit.py fix [--dry-run]       (fixes from the latest report, without a new scan)
     security_audit.py accept FINDING_ID "reason" [--days 90]
     security_audit.py tools
 
@@ -31,7 +35,7 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 HOME = os.path.expanduser("~")
 STATE_DIR = os.path.join(HOME, ".security-audit")
 STATE_FILE = os.path.join(STATE_DIR, "state.json")
@@ -39,6 +43,11 @@ ACCEPTED_FILE = os.path.join(STATE_DIR, "accepted.json")
 LOCK_FILE = os.path.join(STATE_DIR, "lock")
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROBE = os.path.join(HERE, "server_probe.sh")
+REPORTS_DIR = os.path.join(STATE_DIR, "reports")
+# scanners installed with `go install` or `uv tool install`, which a scheduled task's PATH may not include
+for _d in (os.path.join(HOME, ".local", "bin"), os.path.join(HOME, "go", "bin")):
+    if os.path.isdir(_d) and _d not in os.environ.get("PATH", "").split(os.pathsep):
+        os.environ["PATH"] = os.environ.get("PATH", "") + os.pathsep + _d
 
 AREAS = ["mac", "keys", "secrets", "supply", "github", "servers", "claude"]
 AREA_TITLES = {
@@ -1416,9 +1425,28 @@ def finalize(a):
         "version": VERSION, "generated": now_iso(), "host": socket.gethostname(), "account": os.environ.get("USER"),
         "first_run": a.first_run, "areas": a.args.areas, "counts": counts,
         "new": sum(1 for f in open_ if f["new"] and f["severity"] in ("critical", "high", "medium")),
-        "findings": open_, "accepted": accepted, "resolved": resolved, "notes": a.notes, "inventory": a.inventory,
+        "findings": open_, "accepted": accepted, "resolved": resolved, "fixed": [], "fix_actions": [], "notes": a.notes, "inventory": a.inventory,
         "tools": {t: have(t) for t in ["gitleaks", "betterleaks", "osv-scanner", "zizmor", "lynis"]},
     }
+
+
+def attach_fixes(rep, actions):
+    """Record each fix on its finding; move findings fixed this run out of the open list."""
+    by_id = {x["id"]: x for x in actions}
+    keep, fixed = [], []
+    for f in rep["findings"]:
+        x = by_id.get(f["id"])
+        if x:
+            f["remedy"] = x
+        (fixed if x and x["status"] == "fixed" else keep).append(f)
+    rep["findings"], rep["fixed"], rep["fix_actions"] = keep, fixed, actions
+    rep["counts"] = {s: sum(1 for f in keep if f["severity"] == s) for s in SEV_ORDER}
+    rep["new"] = sum(1 for f in keep if f["new"] and f["severity"] in ("critical", "high", "medium"))
+
+
+REMEDY_LABEL = {"fixed": "Fixed automatically", "pr-opened": "Pull request opened", "pr-open": "Pull request open",
+                "declined": "Pull request declined", "skipped": "Not fixed automatically", "failed": "Automatic fix failed", "would-fix": "Would fix",
+                "would-open-pr": "Would open a pull request"}
 
 
 def render_md(rep):
@@ -1432,6 +1460,12 @@ def render_md(rep):
         lines.append("- **%s**%s %s: %s  \n  %s  \n  Fix: %s  \n  `%s`" % (
             f["severity"].upper(), " (NEW)" if f["new"] else "", AREA_TITLES[f["area"]], f["title"],
             f["detail"], f["fix"], f["id"]))
+        if f.get("remedy"):
+            lines[-1] += "  \n  %s: %s %s" % (REMEDY_LABEL[f["remedy"]["status"]], f["remedy"]["detail"],
+                                               f["remedy"]["url"])
+    if rep.get("fixed"):
+        lines += ["", "## Fixed automatically this run", ""] + [
+            "- %s: %s" % (f["target"], f["remedy"]["detail"]) for f in rep["fixed"]]
     if rep["notes"]:
         lines += ["", "## Not checked", ""] + ["- %s" % n["text"] for n in rep["notes"]]
     return "\n".join(lines) + "\n"
@@ -1446,6 +1480,14 @@ def render_html(rep):
         if f.get("accepted"):
             acc = '<p class="acc">Accepted: %s%s</p>' % (e(f["accepted"].get("reason", "")), (
                 " (until %s)" % e(f["accepted"]["until"])) if f["accepted"].get("until") else "")
+        rem = f.get("remedy")
+        if rem:
+            link = ' <a href="%s">%s</a>' % (e(rem["url"]), "pull request" if rem["kind"] == "pr" else "settings") \
+                if rem["url"].startswith("https://") else ""
+            acc += '<p class="rem r-%s"><b>%s:</b> %s%s</p>' % (rem["status"], REMEDY_LABEL[rem["status"]],
+                                                              e(rem["detail"]), link)
+            if rem["kind"] == "pr" and rem["status"] in ("pr-opened", "pr-open"):
+                tag += '<span class="pr">PR</span>'
         return ('<details class="f s-%s"><summary><span class="sev">%s</span>%s<span class="t">%s</span></summary>'
                 '<div class="body"><p>%s</p><p class="fix"><b>Fix:</b> %s</p>%s<code>%s</code></div></details>') % (
             f["severity"], f["severity"], tag, e(f["title"]), e(f["detail"]) or "&nbsp;", e(f["fix"]) or "-", acc,
@@ -1460,6 +1502,9 @@ def render_html(rep):
                     'collaborators.</p>')
     elif new:
         body.append("<h2>New since the last audit</h2>" + "".join(card(f) for f in new))
+    if rep.get("fixed"):
+        body.append("<section><h2>Fixed automatically this run <small>%d</small></h2>%s</section>" % (
+            len(rep["fixed"]), "".join(card(f) for f in rep["fixed"])))
     for area in AREAS:
         fs = [f for f in rep["findings"] if f["area"] == area]
         if area not in rep["areas"]:
@@ -1517,11 +1562,13 @@ padding:10px 12px}.tile b{display:block;font:500 26px/1.2 var(--mono);font-varia
 .body{padding:0 12px 10px 86px;min-width:0}.body p{margin:4px 0;overflow-wrap:anywhere;max-width:75ch}
 .acc{color:var(--muted)}code{font:12px/1.4 var(--mono);color:var(--muted);overflow-wrap:anywhere}
 .ok{color:var(--ok)}ul{padding-left:20px}li{max-width:75ch}
+.rem{color:var(--ok)}.rem.r-failed,.rem.r-declined,.rem.r-skipped{color:var(--high)}.rem a{color:inherit}
+.pr{font:500 11px/1.6 var(--mono);border:1px solid var(--ok);color:var(--ok);border-radius:4px;padding:0 6px}
 @media (max-width:560px){.tiles{grid-template-columns:repeat(2,minmax(0,1fr))}.body{padding-left:12px}}
 </style><main>
 <h1>Security audit</h1><p class="sub">%s · %s on %s · %d new · %d resolved since last audit</p>
 <div class="tiles">%s</div>%s
-<p class="meta" style="margin-top:32px">Scanners: %s. Read-only audit v%s. Accept a risk with
+<p class="meta" style="margin-top:32px">Scanners: %s. Audit v%s. Accept a risk with
 <code>/security-audit accept &lt;id&gt; "reason"</code>.</p></main>""" % (
         e(rep["generated"].replace("T", " ")[:16]), e(rep["account"] or ""), e(rep["host"]), rep["new"],
         len(rep["resolved"]), tiles, "".join(body), e(tools), VERSION)
@@ -1564,6 +1611,10 @@ def cmd_scan(args):
             except Exception as e:  # noqa: BLE001 - one area failing must not hide the others
                 a.note(area, "%s check crashed: %s" % (AREA_TITLES[area], e))
         rep = finalize(a)
+        if args.fix:
+            print("· Safe fixes", file=sys.stderr, flush=True)
+            import security_fix
+            attach_fixes(rep, security_fix.apply_fixes(rep["findings"], dry_run=args.dry_run))
         # keep baselines of areas that did not run this time
         baseline = dict(a.baseline_prev)
         baseline.update(a.baseline)
@@ -1575,9 +1626,8 @@ def cmd_scan(args):
         write_json(STATE_FILE, {"version": VERSION, "last_run": rep["generated"], "baseline": baseline,
                                 "finding_ids": sorted(set(ran_ids + kept)), "leaks-scanned": leaks})
         stamp = datetime.datetime.now().strftime("%Y-%m-%d-%H%M")
-        rdir = os.path.join(STATE_DIR, "reports")
-        os.makedirs(rdir, exist_ok=True)
-        write_json(os.path.join(rdir, "%s.json" % stamp), rep)
+        os.makedirs(REPORTS_DIR, exist_ok=True)
+        write_json(os.path.join(REPORTS_DIR, "%s.json" % stamp), rep)
         for path, text in [(args.html, render_html(rep) if args.html else None),
                            (args.md, render_md(rep) if args.md else None)]:
             if path:
@@ -1607,6 +1657,17 @@ def print_summary(rep):
     med = [f for f in rep["findings"] if f["severity"] == "medium" and not f["new"]]
     if med:
         print("  + %d medium findings (see the report)" % len(med))
+    acts = rep.get("fix_actions") or []
+    if acts:
+        by = {}
+        for x in acts:
+            by[x["status"]] = by.get(x["status"], 0) + 1
+        print("Fixes: " + ", ".join("%d %s" % (n, REMEDY_LABEL[s].lower()) for s, n in sorted(by.items())))
+        seen = set()
+        for x in acts:
+            if x["status"] in ("pr-opened", "failed", "declined") and (x["url"] or x["id"]) not in seen:
+                seen.add(x["url"] or x["id"])
+                print("  %-8s %s %s" % (x["status"], x["detail"][:110], x["url"] or x["id"]))
     for n in rep["notes"]:
         print("Note: %s" % n["text"])
 
@@ -1622,13 +1683,30 @@ def cmd_accept(args):
     return 0
 
 
+def cmd_fix(args):
+    reports = sorted(glob.glob(os.path.join(REPORTS_DIR, "*.json")))
+    if not reports:
+        print("No report yet: run `security_audit.py scan` first.")
+        return 2
+    rep = load_json(reports[-1], {})
+    import security_fix
+    acts = security_fix.apply_fixes(rep.get("findings", []), dry_run=args.dry_run)
+    print("From the report of %s:" % rep.get("generated", "?")[:16])
+    for x in acts:
+        print("  %-13s %-50s %s %s" % (x["status"], x["id"][:50], x["detail"][:90], x["url"]))
+    if not acts:
+        print("  nothing the audit can fix automatically")
+    return 0
+
+
 def cmd_tools(_args):
     for t, why in [("gitleaks", "secrets in git history"), ("osv-scanner", "vulnerable and malicious dependencies"),
                    ("zizmor", "GitHub Actions weaknesses"), ("lynis", "server hardening (install on servers)")]:
         print("%-12s %-8s %s" % (t, "ok" if have(t) else "missing", why))
     missing = [t for t in ["gitleaks", "osv-scanner", "zizmor"] if not have(t)]
     if missing:
-        print("Install: brew install %s" % " ".join(missing))
+        print("Install: brew install %s  (or go install / uv tool install from the official packages)" %
+              " ".join(missing))
     return 0
 
 
@@ -1641,6 +1719,8 @@ def main(argv=None):
     s.add_argument("--quick", action="store_true", help="skip slow checks (softwareupdate, zizmor)")
     s.add_argument("--full-history", action="store_true", help="scan all git history for secrets again")
     s.add_argument("--lynis", action="store_true", help="run Lynis on servers that have it installed")
+    s.add_argument("--fix", action="store_true", help="then make the safe GitHub fixes and open pull requests")
+    s.add_argument("--dry-run", action="store_true", help="with --fix: report the fixes without making them")
     s.add_argument("--html")
     s.add_argument("--json")
     s.add_argument("--md")
@@ -1648,8 +1728,12 @@ def main(argv=None):
     acc.add_argument("id")
     acc.add_argument("reason")
     acc.add_argument("--days", type=int, default=0)
+    fx = sub.add_parser("fix")
+    fx.add_argument("--dry-run", action="store_true")
     sub.add_parser("tools")
     args = ap.parse_args(argv)
+    if args.cmd == "fix":
+        return cmd_fix(args)
     if args.cmd == "accept":
         return cmd_accept(args)
     if args.cmd == "tools":
