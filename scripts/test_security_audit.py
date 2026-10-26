@@ -121,6 +121,17 @@ class DiffTests(unittest.TestCase):
         self.assertEqual(len(sa.finalize(a)["findings"]), 1)
 
 
+class PatternTests(unittest.TestCase):
+    def test_hidden_unicode_still_detected(self):
+        self.assertTrue(sa.HIDDEN_UNICODE.search("run​this"))
+        self.assertIsNone(sa.HIDDEN_UNICODE.search("plain text"))
+
+    def test_test_paths(self):
+        for p in ["apps/api/test/x.test.ts", "src/payments.test.ts", "pkg/__tests__/a.js", "x_test.go"]:
+            self.assertTrue(sa.TEST_PATH.search(p), p)
+        self.assertIsNone(sa.TEST_PATH.search("apps/api/src/alerts/alerts.controller.ts"))
+
+
 class FixTests(unittest.TestCase):
     def test_pin_text_pins_third_party_only(self):
         import security_fix as sf

@@ -65,16 +65,17 @@ SKIP_DIRS = {"node_modules", ".git", "Library", ".Trash", ".cache", ".npm", ".gr
              ".android", ".tart", "Applications", "Movies", "Music", "Pictures"}
 OFFICIAL_MARKETPLACES = {"anthropics/claude-plugins-official"}
 FIRST_PARTY_ACTION_OWNERS = {"actions", "github"}
-HIDDEN_UNICODE = re.compile("[​-‏‪-‮⁠-⁤⁦-⁩﻿\U000e0000-\U000e007f]")
+HIDDEN_UNICODE = re.compile("[\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff\U000e0000-\U000e007f]")
 INJECTION_PHRASES = re.compile(
     r"ignore (all |any )?(previous|prior|above) instructions|do not (tell|inform|show) the user|"
     r"without (asking|telling) the user|disregard (your|the) (rules|instructions)|you are now in (developer|god) mode",
     re.I)
 EXFIL_PATTERNS = re.compile(
     r"(curl|wget)[^\n|]*\|\s*(ba|z)?sh\b|base64\s+(-d|--decode)[^\n]*\|\s*(ba|z)?sh|"
-    r"(discord(app)?\.com/api/webhooks|webhook\.site|ngrok\.io|ngrok-free\.app|pastebin\.com|transfer\.sh|requestbin)|"
+    r"(discord(app)?\.com/api/webhooks|webhook\.site|ngrok\.io|ngrok-free\.app|pastebin\.com|transfer\.sh|requestbin\.)|"
     r"(cat|cp|tar|zip)[^\n]*(\.ssh/id_|\.aws/credentials|\.npmrc|\.git-credentials|Keychains)",
     re.I)
+TEST_PATH = re.compile(r"(^|/)(tests?|__tests__|spec|fixtures?|mocks?|e2e)/|\.(test|spec)\.\w+$|_test\.\w+$", re.I)
 SHAI_HULUD_FILES = {"setup_bun.js", "bun_environment.js", "shai-hulud-workflow.yml", "truffleSecrets.json"}
 MINER_NAMES = re.compile(r"xmrig|kdevtmpfsi|kinsing|minerd|cryptonight", re.I)
 WEB_PORTS = {"22", "80", "443"}
@@ -169,6 +170,8 @@ class Audit:
 
     def add(self, area, severity, check, target, title, detail="", fix=""):
         fid = "%s:%s:%s" % (area, check, target)
+        if any(f["id"] == fid for f in self.findings):
+            return
         self.findings.append({
             "id": fid, "area": area, "severity": severity, "check": check, "target": target,
             "title": title, "detail": detail, "fix": fix,
@@ -613,16 +616,25 @@ def check_secrets(a, checkouts):
         except OSError:
             pass
         a.count(area, "repositories scanned for committed secrets")
-        a.baseline["_leaks"][co] = {"date": datetime.date.today().isoformat(), "head": head}
-        for leak in found[:25]:
+        # the weekly scan reads only new commits, so keep last runs' hits until they are accepted
+        hits = {} if first else {h["target"]: h for h in scanned[co].get("hits", [])}
+        for leak in found[:50]:
             loc = "%s:%s" % (leak.get("File"), leak.get("StartLine"))
-            a.add(area, "high", "committed-secret", "%s/%s:%s" % (co.replace(HOME, "~"), leak.get("RuleID"),
-                                                                   leak.get("Fingerprint", loc)),
-                  "Secret committed to git (%s)" % leak.get("RuleID"),
-                  "%s at %s, commit %s by %s" % (co.replace(HOME, "~"), loc, (leak.get("Commit") or "")[:10],
-                                                 leak.get("Author")),
+            in_test = bool(TEST_PATH.search(leak.get("File") or ""))
+            target = "%s/%s:%s" % (co.replace(HOME, "~"), leak.get("RuleID"), leak.get("Fingerprint", loc))
+            hits[target] = {"target": target, "severity": "low" if in_test else "high",
+                            "title": "Secret committed to git (%s)%s" % (leak.get("RuleID"),
+                                                                          " in a test file" if in_test else ""),
+                            "detail": "%s at %s, commit %s by %s" % (co.replace(HOME, "~"), loc,
+                                                                      (leak.get("Commit") or "")[:10],
+                                                                      leak.get("Author"))}
+        a.baseline["_leaks"][co] = {"date": datetime.date.today().isoformat(), "head": head,
+                                    "hits": sorted(hits.values(), key=lambda h: h["target"])[:100]}
+        for h in hits.values():
+            a.add(area, h["severity"], "committed-secret", h["target"], h["title"], h["detail"],
                   "Rotate the secret first (it is in history even if the file was changed), then remove it from "
-                  "the code. Add `.gitleaksignore` entries for false positives.")
+                  "the code. In a test file it is usually a made-up value: check, then accept the finding or add a "
+                  "`.gitleaksignore` entry.")
 
 
 # ---------------------------------------------------------------------------- area: supply chain
@@ -917,10 +929,14 @@ def audit_repo(a, repo, info):
             zres = json.loads(zout)
         except ValueError:
             zres = []
-        for z in zres[:15]:
+        for z in zres[:40]:
+            if z.get("ident") == "unpinned-uses":  # the audit's own unpinned-action check covers it
+                continue
             sev = {"High": "high", "Medium": "medium"}.get((z.get("determinations") or {}).get("severity"), "low")
             loc = ((z.get("locations") or [{}])[0].get("symbolic") or {}).get("key", {})
             where = (loc.get("Remote") or loc.get("Local") or {}).get("path", "") if isinstance(loc, dict) else ""
+            if re.search(r"(^|/)(vendor|node_modules)/", where):
+                continue
             a.add(area, sev, "zizmor-" + z.get("ident", "x"), "%s/%s" % (name, where),
                   "zizmor: %s" % z.get("desc"), "%s %s" % (name, where), z.get("url", ""))
     return out
