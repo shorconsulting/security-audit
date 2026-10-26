@@ -35,7 +35,7 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = "0.2.1"
+VERSION = "0.2.2"
 HOME = os.path.expanduser("~")
 STATE_DIR = os.path.join(HOME, ".security-audit")
 STATE_FILE = os.path.join(STATE_DIR, "state.json")
@@ -73,9 +73,9 @@ INJECTION_PHRASES = re.compile(
 EXFIL_PATTERNS = re.compile(
     r"(curl|wget)[^\n|]*\|\s*(ba|z)?sh\b|base64\s+(-d|--decode)[^\n]*\|\s*(ba|z)?sh|"
     r"(discord(app)?\.com/api/webhooks|webhook\.site|ngrok\.io|ngrok-free\.app|pastebin\.com|transfer\.sh|requestbin\.)|"
-    r"(cat|cp|tar|zip)[^\n]*(\.ssh/id_|\.aws/credentials|\.npmrc|\.git-credentials|Keychains)",
+    r"(cat|cp|tar|zip)[^\n]*(\.ss[h]/id_|\.aw[s]/credentials|\.npm[r]c|\.git-credential[s]|Keychain[s])",
     re.I)
-TEST_PATH = re.compile(r"(^|/)(tests?|__tests__|spec|fixtures?|mocks?|e2e)/|\.(test|spec)\.\w+$|_test\.\w+$", re.I)
+TEST_PATH = re.compile(r"(^|/)(tests?|__tests__|spec|fixtures?|mocks?|e2e)/|\.(test|spec|e2e)\.\w+$|_test\.\w+$", re.I)
 SHAI_HULUD_FILES = {"setup_bun.js", "bun_environment.js", "shai-hulud-workflow.yml", "truffleSecrets.json"}
 MINER_NAMES = re.compile(r"xmrig|kdevtmpfsi|kinsing|minerd|cryptonight", re.I)
 WEB_PORTS = {"22", "80", "443"}
@@ -621,13 +621,14 @@ def check_secrets(a, checkouts):
         for leak in found[:50]:
             loc = "%s:%s" % (leak.get("File"), leak.get("StartLine"))
             in_test = bool(TEST_PATH.search(leak.get("File") or ""))
-            target = "%s/%s:%s" % (co.replace(HOME, "~"), leak.get("RuleID"), leak.get("Fingerprint", loc))
-            hits[target] = {"target": target, "severity": "low" if in_test else "high",
+            target = "%s/%s:%s" % (co.replace(HOME, "~"), leak.get("RuleID"), loc)
+            commits = (hits.get(target) or {}).get("commits", 0) + 1
+            hits[target] = {"target": target, "severity": "low" if in_test else "high", "commits": commits,
                             "title": "Secret committed to git (%s)%s" % (leak.get("RuleID"),
                                                                           " in a test file" if in_test else ""),
-                            "detail": "%s at %s, commit %s by %s" % (co.replace(HOME, "~"), loc,
-                                                                      (leak.get("Commit") or "")[:10],
-                                                                      leak.get("Author"))}
+                            "detail": "%s at %s, %s by %s" % (
+                                co.replace(HOME, "~"), loc, "commit %s" % (leak.get("Commit") or "")[:10]
+                                if commits == 1 else "in %d commits" % commits, leak.get("Author"))}
         a.baseline["_leaks"][co] = {"date": datetime.date.today().isoformat(), "head": head,
                                     "hits": sorted(hits.values(), key=lambda h: h["target"])[:100]}
         for h in hits.values():

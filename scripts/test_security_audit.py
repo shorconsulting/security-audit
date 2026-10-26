@@ -123,7 +123,7 @@ class DiffTests(unittest.TestCase):
 
 class PatternTests(unittest.TestCase):
     def test_hidden_unicode_still_detected(self):
-        self.assertTrue(sa.HIDDEN_UNICODE.search("run​this"))
+        self.assertTrue(sa.HIDDEN_UNICODE.search("run\u200bthis"))
         self.assertIsNone(sa.HIDDEN_UNICODE.search("plain text"))
 
     def test_test_paths(self):
