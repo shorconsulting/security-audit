@@ -35,7 +35,7 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = "0.2.2"
+VERSION = "0.2.3"
 HOME = os.path.expanduser("~")
 STATE_DIR = os.path.join(HOME, ".security-audit")
 STATE_FILE = os.path.join(STATE_DIR, "state.json")

@@ -29,8 +29,10 @@ Code tab or a local scheduled task, and stop.
 
 0. **Schedule** (arguments say `schedule`): create a **local** scheduled task with `create_scheduled_task`, never a
    cloud routine (a cloud container cannot see this Mac's keys or reach the servers with them). Check
-   `list_scheduled_tasks` first and do not create a second one. Default cron `7 8 * * 1` (Mondays 08:07) unless the
-   arguments give one; prompt `/security-audit scan`. Reply with the task name and the next run time, and stop.
+   `list_scheduled_tasks` first and do not create a second one. Default: Fridays 05:00 US Central, so the report is
+   ready before the weekend. Cron runs in the Mac's local time, so convert it with `readlink /etc/localtime` (for
+   example `0 3 * * 5` on Pacific, `0 5 * * 5` on Central) unless the arguments give a time; prompt
+   `/security-audit scan`. Reply with the task name and the next run time, and stop.
 
 1. **Accept** (`accept <id> "<reason>" [--days N]`): run
    `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/security_audit.py" accept <id> "<reason>" [--days N]`, reply with its

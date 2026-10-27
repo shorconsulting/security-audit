@@ -16,7 +16,7 @@ Private plugin for David Shor's organizations, beside the other `shorconsulting`
 /plugin install security-audit@security-audit
 ```
 
-Then `/security-audit schedule` to run it every Monday morning as a local scheduled task.
+Then `/security-audit schedule` to run it every Friday at 05:00 US Central as a local scheduled task, so the report is ready before the weekend.
 
 It needs `python3` (3.9+), `git`, `ssh` and `gh` (logged in). Each of these scanners is optional, and the audit
 uses it when it is installed:
@@ -37,7 +37,7 @@ brew install gitleaks osv-scanner zizmor
 | Command | What it does |
 | --- | --- |
 | `/security-audit` | Runs the audit, publishes the `Security audit` page and summarizes critical and new findings |
-| `/security-audit schedule` | Creates the weekly local scheduled task (Mondays 08:07) |
+| `/security-audit schedule` | Creates the weekly local scheduled task (Fridays 05:00 Central) |
 | `/security-audit accept <id> "reason" [--days 90]` | Moves a finding you accept (for example a bot's key that has no passphrase) to "Accepted risks" |
 | `/security-audit fix --dry-run` | Shows the safe fixes the next run would make, without making them |
 | `... --no-fix` | Audits only, with no fixes or pull requests |
