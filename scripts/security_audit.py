@@ -38,7 +38,7 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 HOME = os.path.expanduser("~")
 STATE_DIR = os.path.join(HOME, ".security-audit")
 STATE_FILE = os.path.join(STATE_DIR, "state.json")
@@ -776,6 +776,9 @@ def gh(path, raw=False, paginate=False, timeout=60):
 
 
 ACTION_REF = re.compile(r"^\s*-?\s*uses:\s*['\"]?([^@\s'\"]+)@([^\s'\"#]+)", re.M)
+DEPLOY_HINT = re.compile(
+    r"\b(rsync|scp)\b|\bssh\s|appleboy/ssh-action|wrangler(-action| deploy| pages)|vercel|flyctl|fly deploy|kubectl|"
+    r"docker push|firebase deploy|eas (build|submit)|fastlane|testflight", re.I)
 UNTRUSTED_CTX = re.compile(
     r"\$\{\{\s*(github\.event\.(issue|pull_request|comment|review|review_comment|discussion|head_commit|commits|"
     r"workflow_run|pages)[\w.\[\]*]*\.(title|body|message|name|email|head_branch|ref|label|default_branch)|"
@@ -920,6 +923,7 @@ def audit_repo(a, repo, info):
             info["runners"].add("%s|%s" % (name, r.get("name")))
     # workflows
     st, files = gh("repos/%s/contents/.github/workflows?ref=%s" % (name, default))
+    deploys, hosts = [], set()
     if st == 200 and isinstance(files, list):
         for f in files:
             if not f.get("name", "").endswith((".yml", ".yaml")):
@@ -928,6 +932,15 @@ def audit_repo(a, repo, info):
             if st == 200 and text:
                 info["workflows"] += 1
                 analyze_workflow(a, name, f["path"], text)
+                if not re.search(r"mirror", f["name"], re.I) and (
+                        re.search(r"deploy|release|publish|prod", f["name"], re.I) or DEPLOY_HINT.search(text)):
+                    deploys.append(f["path"])
+                for ip, names in info["servers"].items():
+                    if ip in text or any(re.search(r"(?<![\w.-])%s(?![\w-])" % re.escape(n), text) for n in names):
+                        hosts.add(ip)
+    # which repositories reach production, for the fix groups' "where" and production impact
+    a.context.setdefault("repos", {})[name] = {"default": default, "private": bool(private), "deploys": deploys,
+                                               "hosts": sorted(hosts)}
     if have("zizmor") and not a.args.quick:
         rc, zout, _ = run(["zizmor", "--format", "json", "--min-severity", "medium", "--no-progress", name],
                           timeout=300, env=dict(os.environ, GH_TOKEN=info["token"]))
@@ -1014,8 +1027,19 @@ def check_github(a):
         if r["name"] == "tpcp-docs" or re.search(r"shai.?hulud", r.get("description") or "", re.I):
             a.add(area, "critical", "worm-repo", r["full_name"], "Repository created by a credential-stealing worm",
                   r["full_name"], "Your GitHub token was stolen: revoke tokens, rotate secrets, delete the repo.")
+    servers = {}
+    for h in ssh_hosts():  # names a deploy workflow could use for each server (bare words like "velocity" are too common)
+        try:
+            ip = socket.gethostbyname(h["hostname"])
+        except OSError:
+            continue
+        names = servers.setdefault(ip, set())
+        if h["hostname"] != ip:
+            names.add(h["hostname"])
+        if "-" in h["alias"] or "." in h["alias"]:
+            names.add(h["alias"])
     info = {"secret_scanning_off": [], "protection_unavailable": [], "deploy_keys": set(), "outside": set(),
-            "hooks": set(), "runners": set(), "workflows": 0, "token": token}
+            "hooks": set(), "runners": set(), "workflows": 0, "token": token, "servers": servers}
     publics = set()
     with concurrent.futures.ThreadPoolExecutor(max_workers=6) as ex:
         futs = {ex.submit(audit_repo, a, r, info): r for r in repos}
@@ -1246,7 +1270,7 @@ def analyze_server(a, h, rc, facts, err):
         methods[m] = methods.get(m, 0) + int(n or 0)
     a.context.setdefault("servers", {})[h["ip"]] = {
         "label": t, "alias": h["alias"], "names": h.get("names") or [h["alias"]], "root": one("root") == "yes",
-        "logins": logins, "login_methods": methods, "failed_logins": fl,
+        "logins": logins, "login_methods": methods, "failed_logins": fl, "units": facts.get("unit", []),
         "tcp": sorted({"%s|%s" % (port, proc) for proto, addr, port, proc in listen if proto == "tcp"}),
         "exposed": exposed}
 
@@ -1557,7 +1581,17 @@ def render_html(rep):
             chips += '<span class="st st-%s">%s</span>' % (e(last["status"]), e(last["status"].replace("-", " ")))
         li = lambda xs: "".join("<li>%s</li>" % e(x) for x in xs)  # noqa: E731
         checks = [c["label"] for c in g["checks"]]
-        parts = ['<h4>What this touches</h4><ul>%s</ul>' % li(g["touches"])]
+        imp = g.get("impact")
+        if imp:
+            chips = '<span class="imp imp-%s">%s</span>' % (e(imp["level"]), e(imp["label"])) + chips
+        parts = []
+        if g.get("where"):
+            parts.append('<h4>Where</h4><ul>%s</ul>' % "".join(
+                "<li>%s%s%s</li>" % (e(w["name"]), ' <span class="prod">production</span>' if w["production"] else "",
+                                     (" · " + e(w["detail"])) if w.get("detail") else "") for w in g["where"]))
+        if imp:
+            parts.append('<h4>Production impact</h4><p>%s</p>' % e(imp["text"]))
+        parts.append('<h4>What this touches</h4><ul>%s</ul>' % li(g["touches"]))
         parts.append('<h4>Checked before and after</h4>' + ('<ul>%s</ul>' % li(checks) if checks else
                      '<p>No automatic connectivity check applies; Claude confirms each step with you.</p>'))
         parts.append('<h4>Steps</h4><ol>%s</ol>' % li(g["steps"]))
@@ -1573,9 +1607,29 @@ def render_html(rep):
                      'Fix</button><code class="cmd">%s</code></div><p class="hint">Copies the command; paste it into '
                      'Claude Code on this Mac to start the guided fix.</p>' % (e(g["who"]), e(g["command"]),
                                                                               e(g["command"])))
-        return ('<details class="g s-%s"><summary><span class="sev">%s</span><span class="t">%s</span>%s</summary>'
-                '<div class="gbody">%s<h4>Findings</h4>%s</div></details>') % (
-            g["severity"], g["severity"], e(g["title"]), chips, "".join(parts), "".join(card(f) for f in fs))
+        return ('<details class="g s-%s" id="%s"><summary><span class="sev">%s</span><span class="t">%s</span>%s'
+                '</summary><div class="gbody">%s<h4>Findings</h4>%s</div></details>') % (
+            g["severity"], e(g["id"]), g["severity"], e(g["title"]), chips, "".join(parts),
+            "".join(card(f) for f in fs))
+
+    def plan_table(groups):
+        levels = ["none", "prod-safe", "deploys", "downtime"]
+        n = {lv: sum(1 for g in groups if (g.get("impact") or {}).get("level") == lv) for lv in levels}
+        rows = []
+        for g in groups:
+            imp = g.get("impact") or {"level": "none", "label": "-"}
+            where = "<br>".join("%s%s" % (e(w["name"]), ' <span class="prod">production</span>' if w["production"]
+                                          else "") for w in g.get("where", [])[:4])
+            rows.append('<tr><td><span class="sev s-%s">%s</span></td><td><a class="gl" href="#%s">%s</a></td>'
+                        '<td>%s</td><td><span class="imp imp-%s">%s</span></td></tr>' % (
+                            g["severity"], g["severity"], e(g["id"]), e(g["title"]), where, e(imp["level"]),
+                            e(imp["label"])))
+        return ('<section><h2>Fix plan <small>%d groups</small></h2><p class="meta">%d no production impact · %d '
+                'production without downtime · %d deploy to production · %d need downtime. Each row opens its group '
+                'below, with its Fix button.</p><div class="tw"><table class="plan"><thead><tr><th>Severity</th>'
+                '<th>Fix group</th><th>Where</th><th>Production impact</th></tr></thead><tbody>%s</tbody></table>'
+                '</div></section>') % (len(groups), n["none"], n["prod-safe"], n["deploys"], n["downtime"],
+                                       "".join(rows))
 
     groups = rep.get("groups") or []
     tiles = "".join('<div class="tile s-%s"><b>%d</b><span>%s</span></div>' % (s, c[s], s)
@@ -1597,6 +1651,8 @@ def render_html(rep):
                 since, len(rep["resolved_since"]), "".join(
                     "<li>%s: %s <code>%s</code></li>" % (e(r["severity"]), e(r["title"]), e(r["target"]))
                     for r in rep["resolved_since"])))
+    if groups:
+        body.append(plan_table(groups))
     if rep["first_run"]:
         body.append('<p class="lead">First audit on this account: everything below is the starting point. From next '
                     'week the page highlights what changed, such as new keys, new startup items, new hooks and new '
@@ -1686,6 +1742,16 @@ color:var(--muted);margin:14px 0 4px;font-weight:600}.gbody ul,.gbody ol{margin:
 .fixrow{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
 .fixbtn{font:600 14px/1 var(--sans);background:var(--fg);color:var(--bg);border:0;border-radius:6px;padding:9px 18px;
 cursor:pointer}.fixbtn:focus-visible{outline:2px solid var(--low);outline-offset:2px}
+.imp{font:500 11px/1.6 var(--mono);border-radius:4px;padding:0 6px;border:1px solid currentColor;white-space:nowrap}
+.imp-none{color:var(--ok)}.imp-prod-safe{color:var(--low)}.imp-deploys{color:var(--med)}.imp-downtime{color:var(--crit)}
+.prod{font:500 10px/1.6 var(--mono);text-transform:uppercase;letter-spacing:.05em;color:var(--high)}
+.tw{overflow-x:auto;background:var(--card);border:1px solid var(--line);border-radius:8px}
+.plan{border-collapse:collapse;width:100%%;font-size:13px;min-width:640px}
+.plan th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:600;
+padding:8px 10px;border-bottom:1px solid var(--line)}.plan td{padding:7px 10px;border-bottom:1px solid var(--line);
+vertical-align:top}.plan tr:last-child td{border-bottom:0}.plan a{color:var(--fg)}
+.plan .sev.s-critical{color:var(--crit)}.plan .sev.s-high{color:var(--high)}.plan .sev.s-medium{color:var(--med)}
+.plan .sev.s-low{color:var(--low)}
 .cmd{font:12px/1.4 var(--mono);color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:4px;
 padding:5px 8px;user-select:all;overflow-wrap:anywhere}
 @media (max-width:560px){.tiles{grid-template-columns:repeat(2,minmax(0,1fr))}.body,.gbody{padding-left:12px}}
@@ -1695,7 +1761,12 @@ padding:5px 8px;user-select:all;overflow-wrap:anywhere}
 <p class="meta" style="margin-top:32px">Scanners: %s. Audit v%s. Accept a risk with
 <code>/security-audit accept &lt;id&gt; "reason"</code>.</p></main>
 <script>
+function openGroup(id) { var d = document.getElementById(id); if (d && d.tagName === "DETAILS") { d.open = true;
+  d.scrollIntoView({block: "start"}); } }
+if (/^#[\\w.~-]+$/.test(location.hash)) openGroup(location.hash.slice(1));
 document.addEventListener("click", function (ev) {
+  var a = ev.target.closest("a.gl");
+  if (a) { ev.preventDefault(); openGroup(a.getAttribute("href").slice(1)); return; }
   var b = ev.target.closest(".fixbtn");
   if (!b) return;
   var cmd = b.getAttribute("data-cmd"), code = b.parentNode.querySelector(".cmd");
@@ -1878,7 +1949,9 @@ def cmd_groups(args):
             print(json.dumps(groups, indent=1))
             return 0
         for g in groups:
-            print("%-8s %3d  %-48s %s" % (g["severity"], len(g["finding_ids"]), g["id"], g["title"]))
+            print("%-8s %3d  %-48s %-24s %s | %s" % (
+                g["severity"], len(g["finding_ids"]), g["id"], (g.get("impact") or {}).get("label", ""), g["title"],
+                ", ".join(w["name"] + (" (production)" if w["production"] else "") for w in g.get("where", []))))
         return 0
     rep, g = find_group(args.id)
     if not g:
@@ -1893,6 +1966,11 @@ def cmd_groups(args):
         return 0
     by_id = {f["id"]: f for f in rep.get("findings", [])}
     print("%s  [%s]  %s\n%s\n" % (g["title"], g["severity"], g["id"], g["who"]))
+    for w in g.get("where", []):
+        print("Where: %s%s%s" % (w["name"], " (production)" if w["production"] else "",
+                                 " - " + w["detail"] if w.get("detail") else ""))
+    if g.get("impact"):
+        print("Production impact: %s. %s\n" % (g["impact"]["label"], g["impact"]["text"]))
     for title, items in [("Touches", g["touches"]), ("Steps", g["steps"]),
                          ("Checked before and after", [c["label"] for c in g["checks"]] or ["(none automatic)"]),
                          ("Rollback", g.get("rollback") or ["(none)"])]:

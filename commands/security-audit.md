@@ -41,8 +41,10 @@ Code tab or a local scheduled task, and stop.
 
 1. **Fix a group** (`fix-group <id>`, the command a Fix button on the page copies). The user pasted it, so they are
    here: this is an interactive fix, unlike the scheduled runs, and each change needs their OK in this chat.
-   1. Run `security_audit.py groups <id>` and show the user the plan in a few lines: what it touches, the steps, what
-      is checked before and after, and how it is undone. If the group is not in the latest report, or the report is
+   1. Run `security_audit.py groups <id>` and show the user the plan in a few lines: where it is (repositories,
+      servers, projects, and which are production), its production impact, what it touches, the steps, what is
+      checked before and after, and how it is undone. For a group marked `Needs downtime`, agree on the time with the
+      user before step 2; for `Deploys to production`, say which deploy will run on merge. If the group is not in the latest report, or the report is
       more than 8 days old, say so and offer a fresh `scan --recheck` first.
    2. Run `security_audit.py connectivity <id> --save before` and show the result. A check that already fails is
       not caused by the fix; say so and leave it out of the verdict.
@@ -100,6 +102,8 @@ Code tab or a local scheduled task, and stop.
 
 8. **Reply**, in this order and no longer than needed:
    - the summary line and the artifact link;
+   - the fix plan in one line: how many groups have no production impact, run on production without downtime, deploy
+     to production, or need downtime (the page's Fix plan table lists each with its repositories and servers);
    - what was fixed automatically (counts by kind) and each pull request opened, with its link; any fix that failed;
    - each critical and new high finding: one line with what it is, why it matters, and the fix command;
    - the three changes that would remove the most risk for the least effort, picked from the open findings (for

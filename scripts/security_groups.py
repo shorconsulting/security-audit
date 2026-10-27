@@ -82,8 +82,9 @@ def classify(f, remotes):
     if check in INCIDENT_CHECKS:
         return "incident", target
     if area == "secrets":
-        if check in ("committed-secret", "env-tracked"):
-            return "secrets", checkout_of(f)
+        if check in ("committed-secret", "env-tracked"):  # one group per GitHub repo, however many clones have it
+            co = checkout_of(f)
+            return "secrets", remotes.get(co) or co
         return "local-secrets", "mac"
     if area == "supply":
         co = checkout_of(f)
@@ -338,17 +339,26 @@ def build_server(g, fs, ctx):
 
 
 def build_secrets(g, fs, ctx):
-    co = g["scope"]
-    repo = ctx["remotes"].get(co)
-    files = {}
+    scope = g["scope"]
+    repo = scope if "/" in scope and not scope.startswith("~") else None
+    clones = sorted({checkout_of(f) for f in fs})
+    files, hits = {}, set()
     for f in fs:
-        m = re.search(r" at (.+?):\d+", f["detail"])
-        files.setdefault(m.group(1) if m else f["target"], []).append(f)
-    tests = sum(1 for f in fs if "test file" in f["title"])
-    g["title"] = "Committed secrets in %s" % os.path.basename(co)
+        m = re.search(r" at (.+?):(\d+)", f["detail"])
+        rule = f["target"].split(":")[0].rsplit("/", 1)[-1]
+        if m:
+            files.setdefault(m.group(1), 0)
+            hits.add((rule, m.group(1), m.group(2)))
+        else:
+            hits.add((rule, f["target"], ""))
+    tests = len({h for h in hits if sa.TEST_PATH.search(h[1])})
+    g["title"] = "Committed secrets in %s" % (repo or os.path.basename(scope))
     g["who"] = "Claude reviews each with you; rotating a real secret at its provider is yours"
-    t = ["%d hit(s) in %d file(s)%s: %s." % (len(fs), len(files), (", %d in test files" % tests) if tests else "",
-                                               ", ".join(sorted(files)[:6]) + (" and more" if len(files) > 6 else ""))]
+    t = ["%d secret(s) in %d file(s)%s: %s." % (len(hits), len(files), (", %d in test files" % tests) if tests else "",
+                                                ", ".join(sorted(files)[:6]) + (" and more" if len(files) > 6 else ""))]
+    if len(clones) > 1:
+        t.append("Found in %d local clones of the repository (%s); it is one history, so one fix covers them all." % (
+            len(clones), ", ".join(clones)))
     t.append("A made-up test value needs only a `.gitleaksignore` entry: one pull request, nothing else changes.")
     t.append("Rotating a real secret breaks every place that still has the old value until it is updated: env "
              "files on the servers, GitHub Actions secrets%s, hosting dashboards. The old value stays in git "
@@ -479,6 +489,133 @@ def build_other(g, fs, ctx):
     g.setdefault("checks", [])
 
 
+# ---------------------------------------------------------------------------- where, and production impact
+
+IMPACT_LABELS = {"none": "No production impact", "prod-safe": "Production, no downtime",
+                 "deploys": "Deploys to production", "downtime": "Needs downtime"}
+
+
+def server_projects(ip, ctx):
+    srv = ctx["servers"].get(ip, {})
+    names = [n.lower() for n in srv.get("names", [])] + [h["alias"].lower() for h in ctx["hosts"].get(ip, [])]
+    units = [u.lower() for u in srv.get("units", [])]
+    out = []
+    for repo, r in ctx["repos"].items():
+        short = repo.split("/")[-1].lower()
+        if ip in r.get("hosts", []) or (len(short) >= 4 and any(short in n for n in names + units)):
+            out.append(repo)
+    return sorted(out)
+
+
+def repo_is_production(repo, ctx):
+    r = ctx["repos"].get(repo) or {}
+    return bool(r.get("deploys")) or any(repo in server_projects(ip, ctx) for ip in ctx["servers"])
+
+
+def server_entry(ip, ctx):
+    hs = ctx["hosts"].get(ip, [])
+    alias = ctx["servers"].get(ip, {}).get("alias") or (hs[0]["alias"] if hs else ip)
+    projects = server_projects(ip, ctx)
+    return {"name": "%s server (%s)" % (alias, ip), "production": True,
+            "detail": ("runs " + ", ".join(projects)) if projects else "projects on it not identified"}
+
+
+def repo_entry(repo, ctx):
+    r = ctx["repos"].get(repo) or {}
+    prod = repo_is_production(repo, ctx)
+    detail = []
+    if r.get("deploys"):
+        detail.append("deploys with " + ", ".join(os.path.basename(d) for d in r["deploys"][:3]))
+    for ip in r.get("hosts", []):
+        detail.append("to " + server_entry(ip, ctx)["name"])
+    return {"name": repo, "production": prod, "detail": "; ".join(detail)}
+
+
+def where_of(g, fs, ctx):
+    kind, scope = g["kind"], g["scope"]
+    if kind.startswith("server"):
+        return [server_entry(scope, ctx)]
+    if kind == "key":
+        out = []
+        for f in fs:
+            for dest in re.findall(r"[\w.-]+@([\w-]+(?:\.[\w-]+)*)", f["detail"]):
+                if dest == "github.com":
+                    out.append({"name": "GitHub", "production": False,
+                                "detail": "every repository this key can push to"})
+                else:
+                    try:
+                        ip = socket.gethostbyname(dest)
+                    except OSError:
+                        ip = dest
+                    out.append(server_entry(ip, ctx))
+        uniq = {e["name"]: e for e in out}
+        return list(uniq.values()) or [{"name": "This Mac", "production": False, "detail": "key not used in ssh config"}]
+    if kind in ("secrets", "deps", "workflows", "repo-settings", "secrets-github"):
+        if "/" in scope and not scope.startswith("~"):
+            return [repo_entry(scope, ctx)]
+        return [{"name": scope, "production": False, "detail": "local folder with no GitHub remote"}]
+    if kind in ("org-2fa", "org-settings"):
+        n = sum(1 for r in ctx["repos"] if r.split("/")[0].lower() == scope.lower())
+        return [{"name": "%s organization" % scope, "production": False, "detail": "%d repositories" % n}]
+    if kind == "github-review":
+        repo = repo_of(fs[0]["target"])
+        if "/" in repo:
+            return [repo_entry(repo, ctx)]
+        return [{"name": "%s organization" % repo.split("|")[0], "production": False, "detail": ""}]
+    if kind in ("github-plan",):
+        return [{"name": "GitHub plan", "production": False, "detail": ""}]
+    return [{"name": "This Mac", "production": False, "detail": "Claude Code and macOS settings"
+             if kind.startswith("claude") else "macOS"}]
+
+
+def impact_of(g, fs, ctx):
+    """(level, text): what the fix does to production systems while it is applied."""
+    kind = g["kind"]
+    checks = {f["check"] for f in fs}
+    where = g["where"]
+    prod_names = [w["name"] for w in where if w["production"]]
+    repo = g["scope"] if "/" in g["scope"] and not g["scope"].startswith("~") else None
+    deploys = (ctx["repos"].get(repo) or {}).get("deploys") if repo else None
+    if kind == "server-ssh":
+        return "prod-safe", ("No downtime. Reloading SSH keeps open sessions and does not touch the apps; only new "
+                             "SSH logins are affected, and the checks prove they still work.")
+    if kind == "server-patch":
+        if "reboot" in checks or "security-updates" in checks:
+            return "downtime", ("About 1 to 3 minutes offline while %s reboots: %s. Schedule a quiet window." % (
+                where[0]["name"], where[0]["detail"]))
+        return "prod-safe", "No downtime expected; each service restarts for a few seconds during the upgrade."
+    if kind == "server-firewall":
+        return "prod-safe", ("No downtime if the allowed ports are right; the checks confirm every port that "
+                             "answered before still answers.")
+    if kind == "server-incident":
+        return "downtime", "Likely: cleaning up usually means rebuilding the server from a clean deploy."
+    if kind == "key":
+        return "none", ("No effect on running services; only how this Mac logs in changes. Jobs on this Mac that use "
+                        "the key need it unlocked after a restart.")
+    if kind in ("secrets", "deps", "workflows"):
+        if deploys:
+            what = {"secrets": "Merging the cleanup pull request runs %s, a normal deploy with no functional change. "
+                               "Rotating a real secret causes a short window of failed calls to that service unless "
+                               "the new value is set before the old one is revoked.",
+                    "deps": "Each merged update deploys to production through %s; CI must pass first, and a bad "
+                            "update is undone by reverting the merge.",
+                    "workflows": "Changes the pipeline that deploys to production (%s); the next deploy after the "
+                                 "merge is watched."}[kind]
+            return "deploys", what % ", ".join(os.path.basename(d) for d in deploys[:3])
+        if prod_names:
+            return "prod-safe", "Production code, but no deploy runs on merge; the change ships with your next deploy."
+        return "none", "No production deploy is connected to this repository."
+    if kind == "repo-settings":
+        if "deploy-key-write" in checks:
+            return "prod-safe", "No downtime, unless a server or job pushes with that deploy key; find it first."
+        return "none", "Repository settings only; code and deploys are unchanged."
+    if kind == "org-2fa":
+        return "none", "No downtime; members without two-factor login lose access, which can stop CI that uses their tokens."
+    if kind == "server-review":
+        return "none", "Nothing changes unless you remove an item; removing one stops only what it does."
+    return "none", "No production systems involved."
+
+
 BUILDERS = {"key": build_key, "server-ssh": build_server, "server-patch": build_server,
             "server-firewall": build_server, "server-incident": build_server, "server-review": build_server,
             "secrets": build_secrets, "deps": build_repo, "workflows": build_repo, "repo-settings": build_repo}
@@ -489,7 +626,8 @@ def build_groups(rep):
     findings = [f for f in rep.get("findings", []) if f["severity"] != "info"]
     checkouts = {checkout_of(f) for f in findings if f["area"] in ("secrets", "supply")}
     remotes = {co: remote_of(co) for co in checkouts if co.startswith("~")}
-    ctx = {"servers": (rep.get("context") or {}).get("servers", {}), "hosts": hosts_by_ip(), "remotes": remotes}
+    ctx = {"servers": (rep.get("context") or {}).get("servers", {}), "hosts": hosts_by_ip(), "remotes": remotes,
+           "repos": (rep.get("context") or {}).get("repos", {})}
     by = {}
     for f in findings:
         kind, scope = classify(f, remotes)
@@ -509,6 +647,9 @@ def build_groups(rep):
              "severity": min((f["severity"] for f in fs), key=lambda s: sa.SEV_ORDER[s]),
              "command": "/security-audit fix-group %s" % gid, "checks": []}
         BUILDERS.get(kind, build_other)(g, fs, ctx)
+        g["where"] = where_of(g, fs, ctx)
+        level, text = impact_of(g, fs, ctx)
+        g["impact"] = {"level": level, "label": IMPACT_LABELS[level], "text": text}
         prs = sorted({f["remedy"]["url"] for f in fs if (f.get("remedy") or {}).get("status") in
                       ("pr-open", "pr-opened") and f["remedy"].get("url")})
         if prs:

@@ -53,6 +53,8 @@ The script also runs on its own: `python3 scripts/security_audit.py scan --html 
 
 ## Fix groups
 
+A Fix plan table at the top lists every group with where it is (repositories, servers and the projects on them, production marked) and its production impact: no production impact, production without downtime, deploys to production on merge, or needs downtime.
+
 The page bundles findings into fix groups: one change in one place, checked by one set of tests, such as all
 committed secrets in one repository or all SSH settings on one server. Each group says what the change touches,
 from that run's data: which logins use a key, who logged in to a server this week and by which method, which
