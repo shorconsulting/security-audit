@@ -121,6 +121,40 @@ class DiffTests(unittest.TestCase):
         self.assertEqual(len(sa.finalize(a)["findings"]), 1)
 
 
+class GroupTests(unittest.TestCase):
+    def test_secrets_group_by_repository(self):
+        import security_groups as sg
+        a = audit()
+        a.add("secrets", "high", "committed-secret", "~/work/x/generic-api-key:a.ts:1", "t",
+              "~/work/x at a.ts:1, commit 1 by d")
+        a.add("secrets", "high", "committed-secret", "~/work/x/generic-api-key:b.json:1", "t",
+              "~/work/x at b.json:1, in 18 commits by d")
+        a.add("secrets", "high", "committed-secret", "~/work/y/stripe-access-token:c.ts:9", "t",
+              "~/work/y at c.ts:9, commit 2 by d")
+        a.add("servers", "critical", "root-password-login", "box (10.0.0.9)", "t")
+        a.add("servers", "low", "x11", "box (10.0.0.9)", "t")
+        a.add("servers", "medium", "reboot", "box (10.0.0.9)", "t")
+        groups = sg.build_groups(sa.finalize(a))
+        sizes = sorted((g["kind"], len(g["finding_ids"])) for g in groups)
+        self.assertEqual(sizes, [("secrets", 1), ("secrets", 2), ("server-patch", 1), ("server-ssh", 2)])
+        ssh = next(g for g in groups if g["kind"] == "server-ssh")
+        self.assertEqual(ssh["severity"], "critical")
+        self.assertTrue(any("PermitRootLogin prohibit-password" in s for s in ssh["steps"]))
+        self.assertTrue(ssh["command"].startswith("/security-audit fix-group "))
+
+    def test_compare_flags_only_regressions(self):
+        import security_groups as sg
+        before = {"results": {"ssh:a": {"ok": True, "value": True, "detail": "ok", "label": "ssh a"},
+                              "ssh:b": {"ok": False, "value": False, "detail": "x", "label": "ssh b"},
+                              "units:a": {"ok": True, "value": ["logrotate.service"], "detail": "", "label": "u"}}}
+        after = {"results": {"ssh:a": {"ok": False, "value": False, "detail": "denied", "label": "ssh a"},
+                             "ssh:b": {"ok": False, "value": False, "detail": "x", "label": "ssh b"},
+                             "units:a": {"ok": True, "value": ["logrotate.service"], "detail": "", "label": "u"}}}
+        reg, rec, same = sg.compare(before, after)
+        self.assertEqual([r[0] for r in reg], ["ssh a"])
+        self.assertEqual(len(same), 2)
+
+
 class RecheckTests(unittest.TestCase):
     def test_still_open_and_resolved(self):
         base = {"generated": "2026-10-30T05:10", "findings": [

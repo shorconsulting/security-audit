@@ -65,6 +65,8 @@ $S timeout 90 find /home /root /srv /var/www /opt -xdev -maxdepth 10 \( -name se
 p failed_logins "$($S journalctl -q --since '-7 days' -u ssh -u sshd 2>/dev/null | grep -cE 'Failed password|Invalid user|authentication failure')"
 $S journalctl -q --since '-7 days' -u ssh -u sshd 2>/dev/null | grep -oE 'Accepted [a-z-]+ for [^ ]+ from [0-9a-fA-F.:]+' |
   awk '{print $4"@"$6}' | sort | uniq -c | sort -rn | head -15 | while read -r n who; do p accepted "$who|$n"; done
+$S journalctl -q --since '-7 days' -u ssh -u sshd 2>/dev/null | grep -oE 'Accepted [a-z-]+ for' | awk '{print $2}' |
+  sort | uniq -c | while read -r n m; do p login_method "$m|$n"; done
 
 # containers
 command -v docker >/dev/null 2>&1 && $S docker ps --format '{{.Names}}|{{.Image}}|{{.Ports}}' 2>/dev/null | while read -r l; do p container "$l"; done

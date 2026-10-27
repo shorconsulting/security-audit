@@ -40,6 +40,8 @@ brew install gitleaks osv-scanner zizmor
 | `/security-audit` | Runs the audit, publishes the `Security audit` page and summarizes critical and new findings |
 | `/security-audit schedule` | Creates the Friday audit and the Wednesday re-check as local scheduled tasks (05:00 Central) |
 | `/security-audit accept <id> "reason" [--days 90]` | Moves a finding you accept (for example a bot's key that has no passphrase) to "Accepted risks" |
+| `/security-audit fix-group <id>` | Guided fix of one group: shows what it touches, checks connectivity before, makes the change with your OK, checks again and rolls back on a regression |
+| `/security-audit groups` | Lists the fix groups of the latest report |
 | `/security-audit recheck` | Mid-week reminder: re-runs the audit and lists what is still open since the weekly audit |
 | `/security-audit fix --dry-run` | Shows the safe fixes the next run would make, without making them |
 | `... --no-fix` | Audits only, with no fixes or pull requests |
@@ -48,6 +50,19 @@ brew install gitleaks osv-scanner zizmor
 | `... --quick` | Skips the slow checks (`softwareupdate`, zizmor) |
 
 The script also runs on its own: `python3 scripts/security_audit.py scan --html report.html`.
+
+## Fix groups
+
+The page bundles findings into fix groups: one change in one place, checked by one set of tests, such as all
+committed secrets in one repository or all SSH settings on one server. Each group says what the change touches,
+from that run's data: which logins use a key, who logged in to a server this week and by which method, which
+services listen. It also lists the steps, the connectivity checks run before and after (ssh to every alias, failed
+services, open ports, HTTP, CI on the default branch), and the rollback.
+
+The Fix button copies `/security-audit fix-group <id>`. The page cannot run anything on your Mac, so paste the
+command into Claude Code. It snapshots the checks, makes the change with your OK at each risky step, compares the
+checks, and rolls back if something that worked before fails. Outcomes go to `~/.security-audit/fixes.json` and show
+on the page.
 
 ## What it fixes on its own
 

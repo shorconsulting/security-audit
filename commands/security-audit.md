@@ -1,7 +1,7 @@
 ---
 description: Weekly security audit of this Mac, SSH keys, local repos, GitHub orgs, servers and Claude plugins, with safe GitHub fixes and pull requests
-argument-hint: '[scan | recheck | fix --dry-run | schedule | accept <id> "<reason>" [--days N] | tools] [--only AREA,...] [--skip AREA,...] [--quick] [--lynis] [--full-history] [--no-fix]'
-allowed-tools: Bash(python3 *), Artifact, PushNotification, mcp__scheduled-tasks__create_scheduled_task, mcp__scheduled-tasks__list_scheduled_tasks
+argument-hint: '[scan | recheck | fix-group <id> | groups | fix --dry-run | schedule | accept <id> "<reason>" [--days N] | tools] [--only AREA,...] [--skip AREA,...] [--quick] [--lynis] [--full-history] [--no-fix]'
+allowed-tools: Bash(python3 *), Bash(ssh *), Artifact, PushNotification, mcp__scheduled-tasks__create_scheduled_task, mcp__scheduled-tasks__list_scheduled_tasks
 ---
 
 Run the security audit and show the result as the `Security audit` artifact. The scan itself is **read-only**. With
@@ -39,17 +39,40 @@ Code tab or a local scheduled task, and stop.
    `0 3 * * 3` on Pacific, `0 5 * * 5` and `0 5 * * 3` on Central) unless the arguments give times. Reply with the
    task names and next run times, and stop.
 
-1. **Accept** (`accept <id> "<reason>" [--days N]`): run
+1. **Fix a group** (`fix-group <id>`, the command a Fix button on the page copies). The user pasted it, so they are
+   here: this is an interactive fix, unlike the scheduled runs, and each change needs their OK in this chat.
+   1. Run `security_audit.py groups <id>` and show the user the plan in a few lines: what it touches, the steps, what
+      is checked before and after, and how it is undone. If the group is not in the latest report, or the report is
+      more than 8 days old, say so and offer a fresh `scan --recheck` first.
+   2. Run `security_audit.py connectivity <id> --save before` and show the result. A check that already fails is
+      not caused by the fix; say so and leave it out of the verdict.
+   3. Ask once for the go-ahead on the whole plan, and again right before any step that changes a server's SSH or
+      firewall, reboots a server, deletes something, or merges a pull request.
+   4. Do the steps in order. Before changing a file on a server, copy it to `/root/security-audit-backup/<date>/`.
+      Where the plan opens an SSH control connection, open it first and send every server command through it, so a
+      rollback still works if new logins fail. Steps that are the user's (typing a passphrase, rotating a secret at its
+      provider, an organization setting in GitHub's web UI): give the exact command or link and wait for them. Never
+      type, ask for, or echo a password, passphrase or secret value.
+   5. Run `security_audit.py connectivity <id> --compare before`. Exit code 1 means a regression: roll back at once
+      as the plan says, compare again, and tell the user what failed.
+   6. Record the outcome: `security_audit.py groups <id> --record verified "<what was done>"` (or `rolled-back`,
+      `failed`, `skipped`). The page shows it from the next run, and the next audit confirms the findings are gone.
+   7. Close any control connection (`ssh -S <socket> -O exit <alias>`). Reply with what changed, the before/after
+      checks, and anything left for the user.
+
+   `groups` alone lists every fix group of the latest report with its id.
+
+2. **Accept** (`accept <id> "<reason>" [--days N]`): run
    `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/security_audit.py" accept <id> "<reason>" [--days N]`, reply with its
    output line, and stop. Accepted findings move to the "Accepted risks" section until the days run out.
 
-2. **Preview fixes** (`fix --dry-run`): run `security_audit.py fix --dry-run` and reply with what it would change,
+3. **Preview fixes** (`fix --dry-run`): run `security_audit.py fix --dry-run` and reply with what it would change,
    grouped by kind, and stop. (`fix` without `--dry-run` applies them from the latest report without a new scan.)
 
-3. **Tools** (`tools`): run `security_audit.py tools` and reply with its output. If scanners are missing, give the
+4. **Tools** (`tools`): run `security_audit.py tools` and reply with its output. If scanners are missing, give the
    `brew install` line it prints as the next step. Do not install anything yourself.
 
-4. **Scan** (no arguments, `scan`, `recheck`, or only flags). Let `PAGE` be
+5. **Scan** (no arguments, `scan`, `recheck`, or only flags). Let `PAGE` be
    `<your scratchpad directory, or the current directory if you have none>/security-audit.html`. Run, with a timeout
    of at least 20 minutes (the first run scans all git history when gitleaks is installed):
 
@@ -65,24 +88,25 @@ Code tab or a local scheduled task, and stop.
 
    Exit code 3 means another audit is running: say so in one line and stop.
 
-5. **Publish**: call the Artifact tool with `action: "list"` and look for one titled `Security audit`. If one exists,
+6. **Publish**: call the Artifact tool with `action: "list"` and look for one titled `Security audit`. If one exists,
    read it once and publish `PAGE` to its `url`, so the link stays the same week to week. Otherwise publish `PAGE`
    with `icon: "shield"` and the description `Weekly security audit of the Mac, SSH keys, repos, GitHub, servers and
    Claude plugins`.
 
-6. **Notify**: if the summary line shows any critical finding, or any new high finding, and `PushNotification` is
+7. **Notify**: if the summary line shows any critical finding, or any new high finding, and `PushNotification` is
    available, send one notification: `Security audit: <n> critical, <m> new high - <first title>`. On a re-check,
    notify whenever the `Re-check against` line shows anything still open:
    `Security reminder: <n> issues from <date> still open (<c> critical, <h> high) - <first critical or high title>`.
 
-7. **Reply**, in this order and no longer than needed:
+8. **Reply**, in this order and no longer than needed:
    - the summary line and the artifact link;
    - what was fixed automatically (counts by kind) and each pull request opened, with its link; any fix that failed;
    - each critical and new high finding: one line with what it is, why it matters, and the fix command;
    - the three changes that would remove the most risk for the least effort, picked from the open findings (for
      example "turn on Dependabot alerts in every org" covers dozens of repos with one setting);
    - the `Note:` lines (what was not checked), merged into one or two lines;
-   - one line offering to make the fixes for any of the findings, each with the user's approval.
+   - one line saying each fix group on the page has a Fix button that copies its `/security-audit fix-group <id>`
+     command, naming the id of the most urgent group.
 
    On a re-check, reply instead with: the `Re-check against` line and the artifact link; each critical and high issue
    still open, one line each with its fix; the medium ones as a count by kind; what was resolved since; and anything

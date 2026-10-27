@@ -13,6 +13,8 @@ Usage:
                            [--html PAGE] [--json OUT] [--md OUT]
     security_audit.py scan --recheck        (mid-week: what is still open since the last weekly audit)
     security_audit.py fix [--dry-run]       (fixes from the latest report, without a new scan)
+    security_audit.py groups [GROUP] [--json] [--record verified|rolled-back|failed|skipped NOTE]
+    security_audit.py connectivity GROUP (--save NAME | --compare NAME)
     security_audit.py accept FINDING_ID "reason" [--days 90]
     security_audit.py tools
 
@@ -36,7 +38,7 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 HOME = os.path.expanduser("~")
 STATE_DIR = os.path.join(HOME, ".security-audit")
 STATE_FILE = os.path.join(STATE_DIR, "state.json")
@@ -162,6 +164,7 @@ class Audit:
         self.findings = []
         self.notes = []          # coverage gaps: what could not be checked and why
         self.inventory = {}      # counts of what was looked at, per area
+        self.context = {}        # facts the fix groups describe (who logs in to each server, what listens)
         self.prev = load_json(STATE_FILE, {})
         self.baseline_prev = self.prev.get("baseline", {})
         self.baseline = {}
@@ -1237,6 +1240,15 @@ def analyze_server(a, h, rc, facts, err):
     for l in facts.get("lynis", []):
         if l.startswith("hardening_index="):
             a.inventory.setdefault(area, {})["Lynis hardening index %s" % h["alias"]] = l.split("=", 1)[1]
+    methods = {}
+    for v in facts.get("login_method", []):
+        m, n = (v.split("|") + ["0"])[:2]
+        methods[m] = methods.get(m, 0) + int(n or 0)
+    a.context.setdefault("servers", {})[h["ip"]] = {
+        "label": t, "alias": h["alias"], "names": h.get("names") or [h["alias"]], "root": one("root") == "yes",
+        "logins": logins, "login_methods": methods, "failed_logins": fl,
+        "tcp": sorted({"%s|%s" % (port, proc) for proto, addr, port, proc in listen if proto == "tcp"}),
+        "exposed": exposed}
 
 
 # ---------------------------------------------------------------------------- area: claude
@@ -1445,6 +1457,7 @@ def finalize(a):
         "first_run": a.first_run, "areas": a.args.areas, "counts": counts,
         "new": sum(1 for f in open_ if f["new"] and f["severity"] in ("critical", "high", "medium")),
         "findings": open_, "accepted": accepted, "resolved": resolved, "fixed": [], "fix_actions": [], "notes": a.notes, "inventory": a.inventory,
+        "context": a.context,
         "tools": {t: have(t) for t in ["gitleaks", "betterleaks", "osv-scanner", "zizmor", "lynis"]},
     }
 
@@ -1530,6 +1543,41 @@ def render_html(rep):
                 '<div class="body"><p>%s</p><p class="fix"><b>Fix:</b> %s</p>%s<code>%s</code></div></details>') % (
             f["severity"], f["severity"], tag, e(f["title"]), e(f["detail"]) or "&nbsp;", e(f["fix"]) or "-", acc,
             e(f["id"]))
+    by_id = {f["id"]: f for f in rep["findings"]}
+
+    def group_card(g):
+        fs = [by_id[i] for i in g["finding_ids"] if i in by_id]
+        chips = '<span class="n">%d</span>' % len(fs) if len(fs) > 1 else ""
+        if any(f.get("new") for f in fs):
+            chips += '<span class="new">new</span>'
+        if g.get("prs"):
+            chips += '<span class="pr">PR</span>'
+        last = g.get("last")
+        if last:
+            chips += '<span class="st st-%s">%s</span>' % (e(last["status"]), e(last["status"].replace("-", " ")))
+        li = lambda xs: "".join("<li>%s</li>" % e(x) for x in xs)  # noqa: E731
+        checks = [c["label"] for c in g["checks"]]
+        parts = ['<h4>What this touches</h4><ul>%s</ul>' % li(g["touches"])]
+        parts.append('<h4>Checked before and after</h4>' + ('<ul>%s</ul>' % li(checks) if checks else
+                     '<p>No automatic connectivity check applies; Claude confirms each step with you.</p>'))
+        parts.append('<h4>Steps</h4><ol>%s</ol>' % li(g["steps"]))
+        if g.get("rollback"):
+            parts.append('<h4>If a check fails afterwards</h4><ul>%s</ul>' % li(g["rollback"]))
+        if g.get("prs"):
+            parts.append('<p>Open pull request: %s</p>' % ", ".join('<a href="%s">%s</a>' % (
+                e(u), e(u.split("github.com/")[-1])) for u in g["prs"]))
+        if last:
+            parts.append('<p class="acc">Last attempt %s: %s %s</p>' % (e(last["on"][:10]), e(last["status"]),
+                                                                         e(last.get("note", ""))))
+        parts.append('<p class="who">%s</p><div class="fixrow"><button type="button" class="fixbtn" data-cmd="%s">'
+                     'Fix</button><code class="cmd">%s</code></div><p class="hint">Copies the command; paste it into '
+                     'Claude Code on this Mac to start the guided fix.</p>' % (e(g["who"]), e(g["command"]),
+                                                                              e(g["command"])))
+        return ('<details class="g s-%s"><summary><span class="sev">%s</span><span class="t">%s</span>%s</summary>'
+                '<div class="gbody">%s<h4>Findings</h4>%s</div></details>') % (
+            g["severity"], g["severity"], e(g["title"]), chips, "".join(parts), "".join(card(f) for f in fs))
+
+    groups = rep.get("groups") or []
     tiles = "".join('<div class="tile s-%s"><b>%d</b><span>%s</span></div>' % (s, c[s], s)
                     for s in ["critical", "high", "medium", "low"])
     new = [f for f in rep["findings"] if f.get("new") and f["severity"] != "info"]
@@ -1558,15 +1606,20 @@ def render_html(rep):
     if rep.get("fixed"):
         body.append("<section><h2>Fixed automatically this run <small>%d</small></h2>%s</section>" % (
             len(rep["fixed"]), "".join(card(f) for f in rep["fixed"])))
+    grouped = {i for g in groups for i in g["finding_ids"]}
     for area in AREAS:
         fs = [f for f in rep["findings"] if f["area"] == area]
         if area not in rep["areas"]:
             continue
         inv = rep["inventory"].get(area, {})
         meta = " · ".join("%s %s" % (v, k) if isinstance(v, int) else "%s: %s" % (k, v) for k, v in inv.items())
-        body.append('<section><h2>%s <small>%d open</small></h2><p class="meta">%s</p>%s</section>' % (
-            e(AREA_TITLES[area]), len([f for f in fs if f["severity"] != "info"]), e(meta),
-            "".join(card(f) for f in fs) or '<p class="ok">Nothing found.</p>'))
+        gs = [g for g in groups if by_id.get(g["finding_ids"][0], {}).get("area") == area]
+        loose = [f for f in fs if f["id"] not in grouped]
+        n_groups = (' · %d fix group%s' % (len(gs), "" if len(gs) == 1 else "s")) if gs else ""
+        body.append('<section><h2>%s <small>%d open%s</small></h2><p class="meta">%s</p>%s</section>' % (
+            e(AREA_TITLES[area]), len([f for f in fs if f["severity"] != "info"]), n_groups, e(meta),
+            "".join(group_card(g) for g in gs) + "".join(card(f) for f in loose)
+            or '<p class="ok">Nothing found.</p>'))
     if rep["accepted"]:
         body.append("<section><h2>Accepted risks <small>%d</small></h2>%s</section>" % (
             len(rep["accepted"]), "".join(card(f) for f in rep["accepted"])))
@@ -1617,12 +1670,43 @@ padding:10px 12px}.tile b{display:block;font:500 26px/1.2 var(--mono);font-varia
 .ok{color:var(--ok)}ul{padding-left:20px}li{max-width:75ch}
 .rem{color:var(--ok)}.rem.r-failed,.rem.r-declined,.rem.r-skipped{color:var(--high)}.rem a{color:inherit}
 .pr{font:500 11px/1.6 var(--mono);border:1px solid var(--ok);color:var(--ok);border-radius:4px;padding:0 6px}
-@media (max-width:560px){.tiles{grid-template-columns:repeat(2,minmax(0,1fr))}.body{padding-left:12px}}
+.g{background:var(--card);border:1px solid var(--line);border-left:5px solid var(--info);border-radius:8px;margin:10px 0}
+.g.s-critical{border-left-color:var(--crit)}.g.s-high{border-left-color:var(--high)}
+.g.s-medium{border-left-color:var(--med)}.g.s-low{border-left-color:var(--low)}
+.g>summary{cursor:pointer;padding:12px 14px;display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;list-style:none;
+font-weight:500}.g>summary::-webkit-details-marker{display:none}
+.g>summary:focus-visible{outline:2px solid var(--low);outline-offset:2px}
+.g .n{font:500 11px/1.6 var(--mono);color:var(--muted);border:1px solid var(--line);border-radius:4px;padding:0 6px}
+.st{font:500 11px/1.6 var(--mono);border-radius:4px;padding:0 6px;border:1px solid var(--muted);color:var(--muted)}
+.st-verified,.st-fixed{border-color:var(--ok);color:var(--ok)}.st-rolled-back,.st-failed{border-color:var(--high);color:var(--high)}
+.gbody{padding:0 14px 14px 86px;min-width:0}.gbody h4{font-size:12px;text-transform:uppercase;letter-spacing:.06em;
+color:var(--muted);margin:14px 0 4px;font-weight:600}.gbody ul,.gbody ol{margin:0;padding-left:20px}
+.gbody li{margin:2px 0;overflow-wrap:anywhere}.gbody p{max-width:75ch;overflow-wrap:anywhere}
+.who{color:var(--muted);margin:14px 0 6px}.hint{color:var(--muted);font-size:12px;margin:4px 0 0}
+.fixrow{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.fixbtn{font:600 14px/1 var(--sans);background:var(--fg);color:var(--bg);border:0;border-radius:6px;padding:9px 18px;
+cursor:pointer}.fixbtn:focus-visible{outline:2px solid var(--low);outline-offset:2px}
+.cmd{font:12px/1.4 var(--mono);color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:4px;
+padding:5px 8px;user-select:all;overflow-wrap:anywhere}
+@media (max-width:560px){.tiles{grid-template-columns:repeat(2,minmax(0,1fr))}.body,.gbody{padding-left:12px}}
 </style><main>
 <h1>Security audit</h1><p class="sub">%s · %s on %s · %d new · %d resolved since last audit</p>
 <div class="tiles">%s</div>%s
 <p class="meta" style="margin-top:32px">Scanners: %s. Audit v%s. Accept a risk with
-<code>/security-audit accept &lt;id&gt; "reason"</code>.</p></main>""" % (
+<code>/security-audit accept &lt;id&gt; "reason"</code>.</p></main>
+<script>
+document.addEventListener("click", function (ev) {
+  var b = ev.target.closest(".fixbtn");
+  if (!b) return;
+  var cmd = b.getAttribute("data-cmd"), code = b.parentNode.querySelector(".cmd");
+  function selectIt() { var r = document.createRange(); r.selectNodeContents(code);
+    var s = window.getSelection(); s.removeAllRanges(); s.addRange(r); b.textContent = "Select and copy"; }
+  try {
+    navigator.clipboard.writeText(cmd).then(function () { b.textContent = "Copied";
+      setTimeout(function () { b.textContent = "Fix"; }, 2000); }, selectIt);
+  } catch (e) { selectIt(); }
+});
+</script>""" % (
         e(rep["generated"].replace("T", " ")[:16]), e(rep["account"] or ""), e(rep["host"]), rep["new"],
         len(rep["resolved"]), tiles, "".join(body), e(tools), VERSION)
 
@@ -1675,6 +1759,8 @@ def cmd_scan(args):
             print("· Safe fixes", file=sys.stderr, flush=True)
             import security_fix
             attach_fixes(rep, security_fix.apply_fixes(rep["findings"], dry_run=args.dry_run))
+        import security_groups
+        rep["groups"] = security_groups.build_groups(rep)
         # keep baselines of areas that did not run this time
         baseline = dict(a.baseline_prev)
         baseline.update(a.baseline)
@@ -1767,6 +1853,91 @@ def cmd_fix(args):
     return 0
 
 
+def latest_groups():
+    reports = sorted(glob.glob(os.path.join(REPORTS_DIR, "*.json")))
+    if not reports:
+        return None, []
+    rep = load_json(reports[-1], {})
+    import security_groups
+    return rep, rep.get("groups") or security_groups.build_groups(rep)
+
+
+def find_group(gid):
+    rep, groups = latest_groups()
+    g = next((g for g in groups if g["id"] == gid), None)
+    if not g:
+        print("No fix group %s in the latest report. Groups: %s" % (gid, ", ".join(x["id"] for x in groups[:30])))
+    return rep, g
+
+
+def cmd_groups(args):
+    import security_groups
+    if not args.id:
+        rep, groups = latest_groups()
+        if args.json:
+            print(json.dumps(groups, indent=1))
+            return 0
+        for g in groups:
+            print("%-8s %3d  %-48s %s" % (g["severity"], len(g["finding_ids"]), g["id"], g["title"]))
+        return 0
+    rep, g = find_group(args.id)
+    if not g:
+        return 2
+    if args.record:
+        status, note = args.record
+        security_groups.record(g["id"], status, note)
+        print("Recorded %s for %s: %s" % (status, g["id"], note))
+        return 0
+    if args.json:
+        print(json.dumps(g, indent=1))
+        return 0
+    by_id = {f["id"]: f for f in rep.get("findings", [])}
+    print("%s  [%s]  %s\n%s\n" % (g["title"], g["severity"], g["id"], g["who"]))
+    for title, items in [("Touches", g["touches"]), ("Steps", g["steps"]),
+                         ("Checked before and after", [c["label"] for c in g["checks"]] or ["(none automatic)"]),
+                         ("Rollback", g.get("rollback") or ["(none)"])]:
+        print(title + ":")
+        for i, x in enumerate(items, 1):
+            print("  %s %s" % ("%d." % i if title == "Steps" else "-", x))
+    print("Findings:")
+    for i in g["finding_ids"]:
+        f = by_id.get(i, {})
+        print("  - [%s] %s: %s\n    id: %s" % (f.get("severity"), f.get("title"), (f.get("detail") or "")[:160], i))
+    if g.get("prs"):
+        print("Open pull requests: " + ", ".join(g["prs"]))
+    return 0
+
+
+def cmd_connectivity(args):
+    import security_groups
+    rep, g = find_group(args.id)
+    if not g:
+        return 2
+    os.makedirs(security_groups.SNAP_DIR, mode=0o700, exist_ok=True)
+    if not g["checks"]:
+        print("No automatic connectivity check applies to %s." % g["id"])
+        return 0
+    snap = security_groups.snapshot(g)
+    name = args.save or args.compare + "-after"
+    write_json(os.path.join(security_groups.SNAP_DIR, "%s-%s.json" % (g["id"], name)), snap)
+    if args.save:
+        for r in snap["results"].values():
+            print("  %-4s %-45s %s" % ("ok" if r["ok"] else "FAIL", r["label"], r["detail"]))
+        print("Saved as %s (%d checks, %d failing already)." % (args.save, len(snap["results"]), sum(
+            1 for r in snap["results"].values() if not r["ok"])))
+        return 0
+    before = load_json(os.path.join(security_groups.SNAP_DIR, "%s-%s.json" % (g["id"], args.compare)), None)
+    if not before:
+        print("No snapshot named %s for %s: run --save %s before the change." % (args.compare, g["id"], args.compare))
+        return 2
+    reg, rec, same = security_groups.compare(before, snap)
+    for label, rows in [("REGRESSION", reg), ("recovered", rec), ("same", same)]:
+        for l, b, a in rows:
+            print("  %-10s %-45s before: %s | after: %s" % (label, l, b, a))
+    print("%d regression(s), %d recovered, %d unchanged." % (len(reg), len(rec), len(same)))
+    return 1 if reg else 0
+
+
 def cmd_tools(_args):
     for t, why in [("gitleaks", "secrets in git history"), ("osv-scanner", "vulnerable and malicious dependencies"),
                    ("zizmor", "GitHub Actions weaknesses"), ("lynis", "server hardening (install on servers)")]:
@@ -1798,12 +1969,25 @@ def main(argv=None):
     acc.add_argument("id")
     acc.add_argument("reason")
     acc.add_argument("--days", type=int, default=0)
+    gp = sub.add_parser("groups")
+    gp.add_argument("id", nargs="?")
+    gp.add_argument("--json", action="store_true")
+    gp.add_argument("--record", nargs=2, metavar=("STATUS", "NOTE"))
+    cp = sub.add_parser("connectivity")
+    cp.add_argument("id")
+    mx = cp.add_mutually_exclusive_group(required=True)
+    mx.add_argument("--save", metavar="NAME")
+    mx.add_argument("--compare", metavar="NAME")
     fx = sub.add_parser("fix")
     fx.add_argument("--dry-run", action="store_true")
     sub.add_parser("tools")
     args = ap.parse_args(argv)
     if args.cmd == "fix":
         return cmd_fix(args)
+    if args.cmd == "groups":
+        return cmd_groups(args)
+    if args.cmd == "connectivity":
+        return cmd_connectivity(args)
     if args.cmd == "accept":
         return cmd_accept(args)
     if args.cmd == "tools":
