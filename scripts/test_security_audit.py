@@ -121,6 +121,25 @@ class DiffTests(unittest.TestCase):
         self.assertEqual(len(sa.finalize(a)["findings"]), 1)
 
 
+class RecheckTests(unittest.TestCase):
+    def test_still_open_and_resolved(self):
+        base = {"generated": "2026-10-30T05:10", "findings": [
+            {"id": "keys:no-passphrase:a", "area": "keys", "severity": "high", "title": "t", "target": "a"},
+            {"id": "keys:no-passphrase:b", "area": "keys", "severity": "high", "title": "t", "target": "b"},
+            {"id": "servers:reboot:c", "area": "servers", "severity": "medium", "title": "t", "target": "c"},
+            {"id": "mac:x:d", "area": "mac", "severity": "low", "title": "t", "target": "d"}]}
+        a = audit()
+        a.args.areas = ["keys", "mac"]
+        a.add("keys", "high", "no-passphrase", "a", "t")
+        a.add("keys", "high", "no-passphrase", "new", "t")
+        rep = sa.finalize(a)
+        sa.mark_recheck(rep, base)
+        self.assertEqual(rep["still_open"], ["keys:no-passphrase:a"])
+        # b was fixed; the server finding is not judged because servers did not run; low findings are not tracked
+        self.assertEqual([r["id"] for r in rep["resolved_since"]], ["keys:no-passphrase:b"])
+        self.assertIn("Still open since 2026-10-30", sa.render_html(rep))
+
+
 class PatternTests(unittest.TestCase):
     def test_hidden_unicode_still_detected(self):
         self.assertTrue(sa.HIDDEN_UNICODE.search("run\u200bthis"))

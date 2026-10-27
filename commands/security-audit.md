@@ -1,6 +1,6 @@
 ---
 description: Weekly security audit of this Mac, SSH keys, local repos, GitHub orgs, servers and Claude plugins, with safe GitHub fixes and pull requests
-argument-hint: '[scan | fix --dry-run | schedule | accept <id> "<reason>" [--days N] | tools] [--only AREA,...] [--skip AREA,...] [--quick] [--lynis] [--full-history] [--no-fix]'
+argument-hint: '[scan | recheck | fix --dry-run | schedule | accept <id> "<reason>" [--days N] | tools] [--only AREA,...] [--skip AREA,...] [--quick] [--lynis] [--full-history] [--no-fix]'
 allowed-tools: Bash(python3 *), Artifact, PushNotification, mcp__scheduled-tasks__create_scheduled_task, mcp__scheduled-tasks__list_scheduled_tasks
 ---
 
@@ -27,12 +27,17 @@ Code tab or a local scheduled task, and stop.
 
 ## Steps
 
-0. **Schedule** (arguments say `schedule`): create a **local** scheduled task with `create_scheduled_task`, never a
-   cloud routine (a cloud container cannot see this Mac's keys or reach the servers with them). Check
-   `list_scheduled_tasks` first and do not create a second one. Default: Fridays 05:00 US Central, so the report is
-   ready before the weekend. Cron runs in the Mac's local time, so convert it with `readlink /etc/localtime` (for
-   example `0 3 * * 5` on Pacific, `0 5 * * 5` on Central) unless the arguments give a time; prompt
-   `/security-audit scan`. Reply with the task name and the next run time, and stop.
+0. **Schedule** (arguments say `schedule`): create two **local** scheduled tasks with `create_scheduled_task`, never
+   cloud routines (a cloud container cannot see this Mac's keys or reach the servers with them). Check
+   `list_scheduled_tasks` first and do not create a second copy of either:
+   - `weekly-security-audit`: Fridays 05:00 US Central, so the report is ready before the weekend; prompt
+     `/security-audit scan`.
+   - `security-audit-recheck`: Wednesdays 05:00 US Central, the reminder for whatever Friday's audit left open;
+     prompt `/security-audit recheck`.
+
+   Cron runs in the Mac's local time, so convert with `readlink /etc/localtime` (for example `0 3 * * 5` and
+   `0 3 * * 3` on Pacific, `0 5 * * 5` and `0 5 * * 3` on Central) unless the arguments give times. Reply with the
+   task names and next run times, and stop.
 
 1. **Accept** (`accept <id> "<reason>" [--days N]`): run
    `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/security_audit.py" accept <id> "<reason>" [--days N]`, reply with its
@@ -44,7 +49,7 @@ Code tab or a local scheduled task, and stop.
 3. **Tools** (`tools`): run `security_audit.py tools` and reply with its output. If scanners are missing, give the
    `brew install` line it prints as the next step. Do not install anything yourself.
 
-4. **Scan** (no arguments, `scan`, or only flags). Let `PAGE` be
+4. **Scan** (no arguments, `scan`, `recheck`, or only flags). Let `PAGE` be
    `<your scratchpad directory, or the current directory if you have none>/security-audit.html`. Run, with a timeout
    of at least 20 minutes (the first run scans all git history when gitleaks is installed):
 
@@ -54,6 +59,10 @@ Code tab or a local scheduled task, and stop.
 
    Leave out `--fix` when the arguments say `--no-fix` (and do not pass `--no-fix` on to the script).
 
+   **Re-check** (`recheck`, the Wednesday reminder): run `scan --recheck` instead, without `--fix`. It compares the
+   run with the last weekly report, adds a "Still open since <date>" section to the page and leaves the weekly
+   baselines alone, so Friday's audit still reports a full week of changes.
+
    Exit code 3 means another audit is running: say so in one line and stop.
 
 5. **Publish**: call the Artifact tool with `action: "list"` and look for one titled `Security audit`. If one exists,
@@ -62,7 +71,9 @@ Code tab or a local scheduled task, and stop.
    Claude plugins`.
 
 6. **Notify**: if the summary line shows any critical finding, or any new high finding, and `PushNotification` is
-   available, send one notification: `Security audit: <n> critical, <m> new high - <first title>`.
+   available, send one notification: `Security audit: <n> critical, <m> new high - <first title>`. On a re-check,
+   notify whenever the `Re-check against` line shows anything still open:
+   `Security reminder: <n> issues from <date> still open (<c> critical, <h> high) - <first critical or high title>`.
 
 7. **Reply**, in this order and no longer than needed:
    - the summary line and the artifact link;
@@ -72,6 +83,10 @@ Code tab or a local scheduled task, and stop.
      example "turn on Dependabot alerts in every org" covers dozens of repos with one setting);
    - the `Note:` lines (what was not checked), merged into one or two lines;
    - one line offering to make the fixes for any of the findings, each with the user's approval.
+
+   On a re-check, reply instead with: the `Re-check against` line and the artifact link; each critical and high issue
+   still open, one line each with its fix; the medium ones as a count by kind; what was resolved since; and anything
+   new since the weekly audit that is critical or high.
 
 ## What it checks (for answering questions about a run)
 

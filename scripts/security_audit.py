@@ -11,6 +11,7 @@ settings that only add alerts or block force pushes, and pull requests that pin 
 Usage:
     security_audit.py scan [--only AREA,...] [--skip AREA,...] [--quick] [--full-history] [--lynis] [--fix]
                            [--html PAGE] [--json OUT] [--md OUT]
+    security_audit.py scan --recheck        (mid-week: what is still open since the last weekly audit)
     security_audit.py fix [--dry-run]       (fixes from the latest report, without a new scan)
     security_audit.py accept FINDING_ID "reason" [--days 90]
     security_audit.py tools
@@ -35,7 +36,7 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = "0.2.3"
+VERSION = "0.3.0"
 HOME = os.path.expanduser("~")
 STATE_DIR = os.path.join(HOME, ".security-audit")
 STATE_FILE = os.path.join(STATE_DIR, "state.json")
@@ -44,6 +45,7 @@ LOCK_FILE = os.path.join(STATE_DIR, "lock")
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROBE = os.path.join(HERE, "server_probe.sh")
 REPORTS_DIR = os.path.join(STATE_DIR, "reports")
+RECHECK_SEVERITIES = ("critical", "high", "medium")
 # scanners installed with `go install` or `uv tool install`, which a scheduled task's PATH may not include
 for _d in (os.path.join(HOME, ".local", "bin"), os.path.join(HOME, "go", "bin")):
     if os.path.isdir(_d) and _d not in os.environ.get("PATH", "").split(os.pathsep):
@@ -1439,12 +1441,31 @@ def finalize(a):
     resolved = sorted(i for i in prev_ids - {f["id"] for f in a.findings} if i.split(":")[0] in a.args.areas)
     counts = {s: sum(1 for f in open_ if f["severity"] == s) for s in SEV_ORDER}
     return {
-        "version": VERSION, "generated": now_iso(), "host": socket.gethostname(), "account": os.environ.get("USER"),
+        "version": VERSION, "kind": "scan", "generated": now_iso(), "host": socket.gethostname(), "account": os.environ.get("USER"),
         "first_run": a.first_run, "areas": a.args.areas, "counts": counts,
         "new": sum(1 for f in open_ if f["new"] and f["severity"] in ("critical", "high", "medium")),
         "findings": open_, "accepted": accepted, "resolved": resolved, "fixed": [], "fix_actions": [], "notes": a.notes, "inventory": a.inventory,
         "tools": {t: have(t) for t in ["gitleaks", "betterleaks", "osv-scanner", "zizmor", "lynis"]},
     }
+
+
+def last_weekly_report():
+    for path in sorted(glob.glob(os.path.join(REPORTS_DIR, "*.json")), reverse=True):
+        r = load_json(path, {})
+        if r.get("kind", "scan") == "scan":
+            return r
+    return None
+
+
+def mark_recheck(rep, base):
+    """Compare this run with the last weekly report: which of its issues are still open, which were resolved."""
+    rep["kind"] = "recheck"
+    rep["since"] = base.get("generated", "")
+    was = {f["id"]: f for f in base.get("findings", []) if f["severity"] in RECHECK_SEVERITIES}
+    now = {f["id"] for f in rep["findings"]}
+    rep["still_open"] = [f["id"] for f in rep["findings"] if f["id"] in was]
+    rep["resolved_since"] = [{"id": i, "title": f["title"], "severity": f["severity"], "target": f["target"]}
+                             for i, f in sorted(was.items()) if i not in now and f["area"] in rep["areas"]]
 
 
 def attach_fixes(rep, actions):
@@ -1513,6 +1534,21 @@ def render_html(rep):
                     for s in ["critical", "high", "medium", "low"])
     new = [f for f in rep["findings"] if f.get("new") and f["severity"] != "info"]
     body = []
+    if rep.get("kind") == "recheck":
+        ids = set(rep["still_open"])
+        still = [f for f in rep["findings"] if f["id"] in ids]
+        since = e(rep["since"][:10])
+        body.append('<p class="lead"><b>Mid-week re-check.</b> %d of the critical, high and medium issues from the '
+                    'audit of %s are still open, and %d were resolved or accepted since. Fix each one, or accept it '
+                    'with a reason, before the next weekly audit.</p>' % (len(still), since,
+                                                                          len(rep["resolved_since"])))
+        body.append("<section><h2>Still open since %s <small>%d</small></h2>%s</section>" % (
+            since, len(still), "".join(card(f) for f in still) or '<p class="ok">Everything was dealt with.</p>'))
+        if rep["resolved_since"]:
+            body.append("<section><h2>Resolved since %s <small>%d</small></h2><ul>%s</ul></section>" % (
+                since, len(rep["resolved_since"]), "".join(
+                    "<li>%s: %s <code>%s</code></li>" % (e(r["severity"]), e(r["title"]), e(r["target"]))
+                    for r in rep["resolved_since"])))
     if rep["first_run"]:
         body.append('<p class="lead">First audit on this account: everything below is the starting point. From next '
                     'week the page highlights what changed, such as new keys, new startup items, new hooks and new '
@@ -1628,6 +1664,13 @@ def cmd_scan(args):
             except Exception as e:  # noqa: BLE001 - one area failing must not hide the others
                 a.note(area, "%s check crashed: %s" % (AREA_TITLES[area], e))
         rep = finalize(a)
+        if args.recheck:
+            base = last_weekly_report()
+            if base:
+                mark_recheck(rep, base)
+            else:
+                rep["kind"] = "scan"
+                a.note("github", "No earlier weekly report to re-check against; this run is a normal audit.")
         if args.fix:
             print("· Safe fixes", file=sys.stderr, flush=True)
             import security_fix
@@ -1640,8 +1683,9 @@ def cmd_scan(args):
         prev_ids = a.prev.get("finding_ids", [])
         ran_ids = [f["id"] for f in a.findings]
         kept = [i for i in prev_ids if i.split(":")[0] not in args.areas]
-        write_json(STATE_FILE, {"version": VERSION, "last_run": rep["generated"], "baseline": baseline,
-                                "finding_ids": sorted(set(ran_ids + kept)), "leaks-scanned": leaks})
+        if rep["kind"] == "scan":  # a re-check leaves the weekly baselines alone, so Friday still diffs a week
+            write_json(STATE_FILE, {"version": VERSION, "last_run": rep["generated"], "baseline": baseline,
+                                    "finding_ids": sorted(set(ran_ids + kept)), "leaks-scanned": leaks})
         stamp = datetime.datetime.now().strftime("%Y-%m-%d-%H%M")
         os.makedirs(REPORTS_DIR, exist_ok=True)
         write_json(os.path.join(REPORTS_DIR, "%s.json" % stamp), rep)
@@ -1666,6 +1710,13 @@ def print_summary(rep):
     print("Security audit %s: %d critical, %d high, %d medium, %d low (%d new, %d resolved, %d accepted)" % (
         rep["generated"][:16], c["critical"], c["high"], c["medium"], c["low"], rep["new"], len(rep["resolved"]),
         len(rep["accepted"])))
+    if rep.get("kind") == "recheck":
+        ids = set(rep["still_open"])
+        still = [f for f in rep["findings"] if f["id"] in ids]
+        n = {s: sum(1 for f in still if f["severity"] == s) for s in RECHECK_SEVERITIES}
+        print("Re-check against the audit of %s: %d still open (%d critical, %d high, %d medium), %d resolved or "
+              "accepted since" % (rep["since"][:16], len(still), n["critical"], n["high"], n["medium"],
+                                  len(rep["resolved_since"])))
     for f in rep["findings"]:
         if f["severity"] in ("critical", "high") or (f["new"] and f["severity"] == "medium"):
             print("  %-8s %s%s — %s" % (f["severity"].upper(), "[NEW] " if f["new"] else "", f["title"],
@@ -1738,6 +1789,8 @@ def main(argv=None):
     s.add_argument("--lynis", action="store_true", help="run Lynis on servers that have it installed")
     s.add_argument("--fix", action="store_true", help="then make the safe GitHub fixes and open pull requests")
     s.add_argument("--dry-run", action="store_true", help="with --fix: report the fixes without making them")
+    s.add_argument("--recheck", action="store_true",
+                   help="mid-week: compare with the last weekly report; keep its baselines")
     s.add_argument("--html")
     s.add_argument("--json")
     s.add_argument("--md")
