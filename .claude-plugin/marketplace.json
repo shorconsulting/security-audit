@@ -10,7 +10,7 @@
       "name": "security-audit",
       "source": "./",
       "description": "Weekly read-only security audit: passphraseless SSH keys, committed secrets, malicious and vulnerable dependencies, GitHub org and Actions risks, server hardening and intrusion signs, and Claude plugin/hook/MCP/permission risks, with what is new since last week.",
-      "version": "0.5.0"
+      "version": "0.5.1"
     }
   ]
 }

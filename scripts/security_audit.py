@@ -38,7 +38,7 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = "0.5.0"
+VERSION = "0.5.1"
 HOME = os.path.expanduser("~")
 STATE_DIR = os.path.join(HOME, ".security-audit")
 STATE_FILE = os.path.join(STATE_DIR, "state.json")
@@ -1612,7 +1612,7 @@ def render_html(rep):
             g["severity"], e(g["id"]), g["severity"], e(g["title"]), chips, "".join(parts),
             "".join(card(f) for f in fs))
 
-    def plan_table(groups):
+    def plan_table(groups, title="Fix plan", lead=""):
         levels = ["none", "prod-safe", "deploys", "downtime"]
         n = {lv: sum(1 for g in groups if (g.get("impact") or {}).get("level") == lv) for lv in levels}
         rows = []
@@ -1624,12 +1624,12 @@ def render_html(rep):
                         '<td>%s</td><td><span class="imp imp-%s">%s</span></td></tr>' % (
                             g["severity"], g["severity"], e(g["id"]), e(g["title"]), where, e(imp["level"]),
                             e(imp["label"])))
-        return ('<section><h2>Fix plan <small>%d groups</small></h2><p class="meta">%d no production impact · %d '
+        return ('<section><h2>%s <small>%d groups</small></h2>%s<p class="meta">%d no production impact · %d '
                 'production without downtime · %d deploy to production · %d need downtime. Each row opens its group '
                 'below, with its Fix button.</p><div class="tw"><table class="plan"><thead><tr><th>Severity</th>'
                 '<th>Fix group</th><th>Where</th><th>Production impact</th></tr></thead><tbody>%s</tbody></table>'
-                '</div></section>') % (len(groups), n["none"], n["prod-safe"], n["deploys"], n["downtime"],
-                                       "".join(rows))
+                '</div></section>') % (e(title), len(groups), lead, n["none"], n["prod-safe"], n["deploys"],
+                                       n["downtime"], "".join(rows))
 
     groups = rep.get("groups") or []
     tiles = "".join('<div class="tile s-%s"><b>%d</b><span>%s</span></div>' % (s, c[s], s)
@@ -1644,14 +1644,18 @@ def render_html(rep):
                     'audit of %s are still open, and %d were resolved or accepted since. Fix each one, or accept it '
                     'with a reason, before the next weekly audit.</p>' % (len(still), since,
                                                                           len(rep["resolved_since"])))
-        body.append("<section><h2>Still open since %s <small>%d</small></h2>%s</section>" % (
-            since, len(still), "".join(card(f) for f in still) or '<p class="ok">Everything was dealt with.</p>'))
+        open_groups = [g for g in groups if ids & set(g["finding_ids"])]
+        if open_groups:
+            body.append(plan_table(open_groups, "Still open since %s" % rep["since"][:10]))
+        else:
+            body.append("<section><h2>Still open since %s <small>%d</small></h2>%s</section>" % (
+                since, len(still), "".join(card(f) for f in still) or '<p class="ok">Everything was dealt with.</p>'))
         if rep["resolved_since"]:
             body.append("<section><h2>Resolved since %s <small>%d</small></h2><ul>%s</ul></section>" % (
                 since, len(rep["resolved_since"]), "".join(
                     "<li>%s: %s <code>%s</code></li>" % (e(r["severity"]), e(r["title"]), e(r["target"]))
                     for r in rep["resolved_since"])))
-    if groups:
+    if groups and rep.get("kind") != "recheck":
         body.append(plan_table(groups))
     if rep["first_run"]:
         body.append('<p class="lead">First audit on this account: everything below is the starting point. From next '
