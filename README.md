@@ -11,6 +11,8 @@ Private plugin for David Shor's organizations, beside the other `shorconsulting`
 
 ## Install (each account)
 
+The repository is private: a colleague needs read access to `shorconsulting/security-audit` (and a `gh` login) before the marketplace add works.
+
 ```
 /plugin marketplace add shorconsulting/security-audit
 /plugin install security-audit@security-audit
@@ -40,7 +42,7 @@ brew install gitleaks osv-scanner zizmor
 | `/security-audit` | Runs the audit, publishes the `Security audit` page and summarizes critical and new findings |
 | `/security-audit schedule` | Creates the Friday audit and the Wednesday re-check as local scheduled tasks (05:00 Central) |
 | `/security-audit accept <id> "reason" [--days 90]` | Moves a finding you accept (for example a bot's key that has no passphrase) to "Accepted risks" |
-| `/security-audit fix-group <id>` | Guided fix of one group: shows what it touches, checks connectivity before, makes the change with your OK, checks again and rolls back on a regression |
+| `/security-audit fix-group <number or id>` | Guided fix of one group: shows what it touches, checks connectivity before, makes the change with your OK, checks again and rolls back on a regression |
 | `/security-audit groups` | Lists the fix groups of the latest report |
 | `/security-audit recheck` | Mid-week reminder: re-runs the audit and lists what is still open since the weekly audit |
 | `/security-audit fix --dry-run` | Shows the safe fixes the next run would make, without making them |
@@ -60,6 +62,9 @@ committed secrets in one repository or all SSH settings on one server. Each grou
 from that run's data: which logins use a key, who logged in to a server this week and by which method, which
 services listen. It also lists the steps, the connectivity checks run before and after (ssh to every alias, failed
 services, open ports, HTTP, CI on the default branch), and the rollback.
+
+Every group has a permanent number (#1, #2...), shown in the table and on its Fix button, so people can point each
+other at "#3". A number is never reused once its group is fixed. `fix-group 3` works as well as the id.
 
 The Fix button copies `/security-audit fix-group <id>`. The page cannot run anything on your Mac, so paste the
 command into Claude Code. It snapshots the checks, makes the change with your OK at each risky step, compares the

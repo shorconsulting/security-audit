@@ -1,13 +1,23 @@
 {
   "name": "security-audit",
   "displayName": "Security Audit",
-  "version": "0.5.1",
-  "description": "Weekly read-only security audit of this Mac, its SSH keys (passphraseless keys and what they open), local checkouts (committed secrets, malicious or vulnerable dependencies, npm worm indicators), every GitHub org and repo you can see (2FA, Dependabot, branch protection, deploy keys, webhooks, runners, risky Actions workflows), every server in ~/.ssh/config (sshd settings, new authorized keys, firewall, patches, persistence, miners) and Claude Code itself (plugins, hooks, MCP servers, over-broad permissions, hidden prompt injection). Reports what is new since last week and the fix for each finding.",
+  "version": "0.6.0",
+  "description": "Weekly security audit (Fridays) with a Wednesday re-check, across this Mac, its SSH keys (passphraseless keys and what they open), local checkouts (committed secrets, malicious or vulnerable dependencies, npm worm indicators), every GitHub org and repo you can see (2FA, Dependabot, branch protection, deploy keys, webhooks, runners, risky Actions workflows), every server in ~/.ssh/config (sshd settings, new authorized keys, firewall, patches, persistence, miners) and Claude Code itself (plugins, hooks, MCP servers, over-broad permissions, hidden prompt injection). Makes the GitHub fixes that cannot break a repo and opens pull requests for code changes. Bundles the rest into numbered fix groups, each with where it is, its production impact or downtime, what it touches, and a guided fix that checks connectivity before and after and rolls back on a regression.",
   "author": {
     "name": "David Shor",
     "url": "https://github.com/shorconsulting"
   },
   "homepage": "https://github.com/shorconsulting/security-audit",
   "repository": "https://github.com/shorconsulting/security-audit",
-  "keywords": ["security", "audit", "ssh", "secrets", "supply-chain", "malware", "github", "routine"]
+  "keywords": [
+    "security",
+    "audit",
+    "ssh",
+    "secrets",
+    "supply-chain",
+    "malware",
+    "github",
+    "remediation",
+    "routine"
+  ]
 }

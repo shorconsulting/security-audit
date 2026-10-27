@@ -134,13 +134,25 @@ class GroupTests(unittest.TestCase):
         a.add("servers", "critical", "root-password-login", "box (10.0.0.9)", "t")
         a.add("servers", "low", "x11", "box (10.0.0.9)", "t")
         a.add("servers", "medium", "reboot", "box (10.0.0.9)", "t")
-        groups = sg.build_groups(sa.finalize(a))
+        with tempfile.TemporaryDirectory() as d:
+            groups = sg.build_groups(sa.finalize(a), numbers_path=os.path.join(d, "n.json"))
         sizes = sorted((g["kind"], len(g["finding_ids"])) for g in groups)
         self.assertEqual(sizes, [("secrets", 1), ("secrets", 2), ("server-patch", 1), ("server-ssh", 2)])
         ssh = next(g for g in groups if g["kind"] == "server-ssh")
         self.assertEqual(ssh["severity"], "critical")
         self.assertTrue(any("PermitRootLogin prohibit-password" in s for s in ssh["steps"]))
         self.assertTrue(ssh["command"].startswith("/security-audit fix-group "))
+
+    def test_numbers_are_permanent(self):
+        import security_groups as sg
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "n.json")
+            first = [{"id": "a"}, {"id": "b"}]
+            sg.assign_numbers(first, path)
+            later = [{"id": "c"}, {"id": "b"}]  # a was fixed, c is new
+            sg.assign_numbers(later, path)
+        self.assertEqual([g["number"] for g in first], [1, 2])
+        self.assertEqual({g["id"]: g["number"] for g in later}, {"c": 3, "b": 2})
 
     def test_compare_flags_only_regressions(self):
         import security_groups as sg

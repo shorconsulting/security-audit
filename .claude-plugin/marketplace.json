@@ -1,6 +1,6 @@
 {
   "name": "security-audit",
-  "description": "Security Audit: weekly read-only security audit of the Mac, SSH keys, repos, GitHub orgs, servers and Claude plugins.",
+  "description": "Security Audit: weekly security audit of the Mac, SSH keys, repos, GitHub orgs, servers and Claude plugins, with safe automatic fixes and numbered, guided fix groups.",
   "owner": {
     "name": "David Shor",
     "url": "https://github.com/shorconsulting"
@@ -9,8 +9,8 @@
     {
       "name": "security-audit",
       "source": "./",
-      "description": "Weekly read-only security audit: passphraseless SSH keys, committed secrets, malicious and vulnerable dependencies, GitHub org and Actions risks, server hardening and intrusion signs, and Claude plugin/hook/MCP/permission risks, with what is new since last week.",
-      "version": "0.5.1"
+      "description": "Weekly audit and Wednesday re-check: passphraseless SSH keys, committed secrets, malicious and vulnerable dependencies, GitHub org and Actions risks, server hardening and intrusion signs, and Claude plugin/hook/MCP/permission risks. Safe GitHub fixes and pin-actions pull requests run automatically; everything else is a numbered fix group with its repos, servers, production impact and a guided fix with connectivity checks.",
+      "version": "0.6.0"
     }
   ]
 }

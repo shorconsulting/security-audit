@@ -1,6 +1,6 @@
 ---
 description: Weekly security audit of this Mac, SSH keys, local repos, GitHub orgs, servers and Claude plugins, with safe GitHub fixes and pull requests
-argument-hint: '[scan | recheck | fix-group <id> | groups | fix --dry-run | schedule | accept <id> "<reason>" [--days N] | tools] [--only AREA,...] [--skip AREA,...] [--quick] [--lynis] [--full-history] [--no-fix]'
+argument-hint: '[scan | recheck | fix-group <number or id> | groups | fix --dry-run | schedule | accept <id> "<reason>" [--days N] | tools] [--only AREA,...] [--skip AREA,...] [--quick] [--lynis] [--full-history] [--no-fix]'
 allowed-tools: Bash(python3 *), Bash(ssh *), Artifact, PushNotification, mcp__scheduled-tasks__create_scheduled_task, mcp__scheduled-tasks__list_scheduled_tasks
 ---
 
@@ -39,7 +39,8 @@ Code tab or a local scheduled task, and stop.
    `0 3 * * 3` on Pacific, `0 5 * * 5` and `0 5 * * 3` on Central) unless the arguments give times. Reply with the
    task names and next run times, and stop.
 
-1. **Fix a group** (`fix-group <id>`, the command a Fix button on the page copies). The user pasted it, so they are
+1. **Fix a group** (`fix-group <id>`, the command a Fix button on the page copies, or `fix-group <number>` with the
+   group's permanent number from the page, such as `fix-group 3` or `fix-group #3`; colleagues quote these numbers). The user pasted it, so they are
    here: this is an interactive fix, unlike the scheduled runs, and each change needs their OK in this chat.
    1. Run `security_audit.py groups <id>` and show the user the plan in a few lines: where it is (repositories,
       servers, projects, and which are production), its production impact, what it touches, the steps, what is
@@ -62,7 +63,8 @@ Code tab or a local scheduled task, and stop.
    7. Close any control connection (`ssh -S <socket> -O exit <alias>`). Reply with what changed, the before/after
       checks, and anything left for the user.
 
-   `groups` alone lists every fix group of the latest report with its id.
+   `groups` alone lists every fix group of the latest report with its number and id. Numbers are permanent: a fixed
+   group's number is retired, never given to another group (`~/.security-audit/group-numbers.json`).
 
 2. **Accept** (`accept <id> "<reason>" [--days N]`): run
    `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/security_audit.py" accept <id> "<reason>" [--days N]`, reply with its
@@ -110,7 +112,7 @@ Code tab or a local scheduled task, and stop.
      example "turn on Dependabot alerts in every org" covers dozens of repos with one setting);
    - the `Note:` lines (what was not checked), merged into one or two lines;
    - one line saying each fix group on the page has a Fix button that copies its `/security-audit fix-group <id>`
-     command, naming the id of the most urgent group.
+     command, naming the number and title of the most urgent group (for example `#1 Harden SSH on tidyhaus-api`).
 
    On a re-check, reply instead with: the `Re-check against` line and the artifact link; each critical and high issue
    still open, one line each with its fix; the medium ones as a count by kind; what was resolved since; and anything

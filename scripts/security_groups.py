@@ -21,6 +21,7 @@ import socket
 import security_audit as sa
 
 FIXES_FILE = os.path.join(sa.STATE_DIR, "fixes.json")
+NUMBERS_FILE = os.path.join(sa.STATE_DIR, "group-numbers.json")
 SNAP_DIR = os.path.join(sa.STATE_DIR, "connectivity")
 IP = re.compile(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b")
 SSH_GROUP_CHECKS = {"root-password-login", "password-login", "root-login", "empty-passwords", "x11", "pw-accounts",
@@ -621,8 +622,22 @@ BUILDERS = {"key": build_key, "server-ssh": build_server, "server-patch": build_
             "secrets": build_secrets, "deps": build_repo, "workflows": build_repo, "repo-settings": build_repo}
 
 
-def build_groups(rep):
-    """Group the open findings of a report; return groups ordered by severity."""
+def assign_numbers(groups, path=NUMBERS_FILE):
+    """Give every group a permanent number (#1, #2...) that people can quote; a number is never reused."""
+    reg = sa.load_json(path, {"next": 1, "numbers": {}})
+    changed = False
+    for g in groups:  # already sorted by severity, so new groups are numbered most urgent first
+        if g["id"] not in reg["numbers"]:
+            reg["numbers"][g["id"]] = reg["next"]
+            reg["next"] += 1
+            changed = True
+        g["number"] = reg["numbers"][g["id"]]
+    if changed:
+        sa.write_json(path, reg)
+
+
+def build_groups(rep, numbers_path=NUMBERS_FILE):
+    """Group the open findings of a report; return groups ordered by severity, each with its permanent number."""
     findings = [f for f in rep.get("findings", []) if f["severity"] != "info"]
     checkouts = {checkout_of(f) for f in findings if f["area"] in ("secrets", "supply")}
     remotes = {co: remote_of(co) for co in checkouts if co.startswith("~")}
@@ -665,6 +680,7 @@ def build_groups(rep):
             g["id"] += "-%d" % (n + 1)
             g["command"] = "/security-audit fix-group %s" % g["id"]
     groups.sort(key=lambda g: (sa.SEV_ORDER[g["severity"]], -len(g["finding_ids"]), g["title"]))
+    assign_numbers(groups, numbers_path)
     return groups
 
 

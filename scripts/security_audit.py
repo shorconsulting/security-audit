@@ -38,7 +38,7 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = "0.5.1"
+VERSION = "0.6.0"
 HOME = os.path.expanduser("~")
 STATE_DIR = os.path.join(HOME, ".security-audit")
 STATE_FILE = os.path.join(STATE_DIR, "state.json")
@@ -1604,12 +1604,12 @@ def render_html(rep):
             parts.append('<p class="acc">Last attempt %s: %s %s</p>' % (e(last["on"][:10]), e(last["status"]),
                                                                          e(last.get("note", ""))))
         parts.append('<p class="who">%s</p><div class="fixrow"><button type="button" class="fixbtn" data-cmd="%s">'
-                     'Fix</button><code class="cmd">%s</code></div><p class="hint">Copies the command; paste it into '
-                     'Claude Code on this Mac to start the guided fix.</p>' % (e(g["who"]), e(g["command"]),
-                                                                              e(g["command"])))
-        return ('<details class="g s-%s" id="%s"><summary><span class="sev">%s</span><span class="t">%s</span>%s'
-                '</summary><div class="gbody">%s<h4>Findings</h4>%s</div></details>') % (
-            g["severity"], e(g["id"]), g["severity"], e(g["title"]), chips, "".join(parts),
+                     'Fix #%s</button><code class="cmd">%s</code></div><p class="hint">Copies the command; paste it '
+                     'into Claude Code on this Mac to start the guided fix. Colleagues can refer to it as #%s.</p>' % (
+                         e(g["who"]), e(g["command"]), g.get("number", ""), e(g["command"]), g.get("number", "")))
+        return ('<details class="g s-%s" id="%s"><summary><span class="num">#%s</span><span class="sev">%s</span>'
+                '<span class="t">%s</span>%s</summary><div class="gbody">%s<h4>Findings</h4>%s</div></details>') % (
+            g["severity"], e(g["id"]), g.get("number", ""), g["severity"], e(g["title"]), chips, "".join(parts),
             "".join(card(f) for f in fs))
 
     def plan_table(groups, title="Fix plan", lead=""):
@@ -1620,13 +1620,13 @@ def render_html(rep):
             imp = g.get("impact") or {"level": "none", "label": "-"}
             where = "<br>".join("%s%s" % (e(w["name"]), ' <span class="prod">production</span>' if w["production"]
                                           else "") for w in g.get("where", [])[:4])
-            rows.append('<tr><td><span class="sev s-%s">%s</span></td><td><a class="gl" href="#%s">%s</a></td>'
-                        '<td>%s</td><td><span class="imp imp-%s">%s</span></td></tr>' % (
-                            g["severity"], g["severity"], e(g["id"]), e(g["title"]), where, e(imp["level"]),
-                            e(imp["label"])))
+            rows.append('<tr><td class="num">#%s</td><td><span class="sev s-%s">%s</span></td><td><a class="gl" '
+                        'href="#%s">%s</a></td><td>%s</td><td><span class="imp imp-%s">%s</span></td></tr>' % (
+                            g.get("number", ""), g["severity"], g["severity"], e(g["id"]), e(g["title"]), where,
+                            e(imp["level"]), e(imp["label"])))
         return ('<section><h2>%s <small>%d groups</small></h2>%s<p class="meta">%d no production impact · %d '
                 'production without downtime · %d deploy to production · %d need downtime. Each row opens its group '
-                'below, with its Fix button.</p><div class="tw"><table class="plan"><thead><tr><th>Severity</th>'
+                'below, with its Fix button.</p><div class="tw"><table class="plan"><thead><tr><th>#</th><th>Severity</th>'
                 '<th>Fix group</th><th>Where</th><th>Production impact</th></tr></thead><tbody>%s</tbody></table>'
                 '</div></section>') % (e(title), len(groups), lead, n["none"], n["prod-safe"], n["deploys"],
                                        n["downtime"], "".join(rows))
@@ -1756,6 +1756,8 @@ padding:8px 10px;border-bottom:1px solid var(--line)}.plan td{padding:7px 10px;b
 vertical-align:top}.plan tr:last-child td{border-bottom:0}.plan a{color:var(--fg)}
 .plan .sev.s-critical{color:var(--crit)}.plan .sev.s-high{color:var(--high)}.plan .sev.s-medium{color:var(--med)}
 .plan .sev.s-low{color:var(--low)}
+.num{font:500 12px/1.4 var(--mono);color:var(--muted);min-width:34px;font-variant-numeric:tabular-nums}
+.plan td.num{white-space:nowrap}
 .cmd{font:12px/1.4 var(--mono);color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:4px;
 padding:5px 8px;user-select:all;overflow-wrap:anywhere}
 @media (max-width:560px){.tiles{grid-template-columns:repeat(2,minmax(0,1fr))}.body,.gbody{padding-left:12px}}
@@ -1774,11 +1776,12 @@ document.addEventListener("click", function (ev) {
   var b = ev.target.closest(".fixbtn");
   if (!b) return;
   var cmd = b.getAttribute("data-cmd"), code = b.parentNode.querySelector(".cmd");
+  if (!b.dataset.label) b.dataset.label = b.textContent;
   function selectIt() { var r = document.createRange(); r.selectNodeContents(code);
     var s = window.getSelection(); s.removeAllRanges(); s.addRange(r); b.textContent = "Select and copy"; }
   try {
     navigator.clipboard.writeText(cmd).then(function () { b.textContent = "Copied";
-      setTimeout(function () { b.textContent = "Fix"; }, 2000); }, selectIt);
+      setTimeout(function () { b.textContent = b.dataset.label; }, 2000); }, selectIt);
   } catch (e) { selectIt(); }
 });
 </script>""" % (
@@ -1938,8 +1941,10 @@ def latest_groups():
 
 
 def find_group(gid):
+    """A group by its id or its number (`12` or `#12`)."""
     rep, groups = latest_groups()
-    g = next((g for g in groups if g["id"] == gid), None)
+    num = gid.lstrip("#")
+    g = next((g for g in groups if g["id"] == gid or (num.isdigit() and g.get("number") == int(num))), None)
     if not g:
         print("No fix group %s in the latest report. Groups: %s" % (gid, ", ".join(x["id"] for x in groups[:30])))
     return rep, g
@@ -1953,8 +1958,9 @@ def cmd_groups(args):
             print(json.dumps(groups, indent=1))
             return 0
         for g in groups:
-            print("%-8s %3d  %-48s %-24s %s | %s" % (
-                g["severity"], len(g["finding_ids"]), g["id"], (g.get("impact") or {}).get("label", ""), g["title"],
+            print("#%-4s %-8s %3d  %-48s %-24s %s | %s" % (
+                g.get("number", ""), g["severity"], len(g["finding_ids"]), g["id"],
+                (g.get("impact") or {}).get("label", ""), g["title"],
                 ", ".join(w["name"] + (" (production)" if w["production"] else "") for w in g.get("where", []))))
         return 0
     rep, g = find_group(args.id)
@@ -1969,7 +1975,7 @@ def cmd_groups(args):
         print(json.dumps(g, indent=1))
         return 0
     by_id = {f["id"]: f for f in rep.get("findings", [])}
-    print("%s  [%s]  %s\n%s\n" % (g["title"], g["severity"], g["id"], g["who"]))
+    print("#%s %s  [%s]  %s\n%s\n" % (g.get("number", ""), g["title"], g["severity"], g["id"], g["who"]))
     for w in g.get("where", []):
         print("Where: %s%s%s" % (w["name"], " (production)" if w["production"] else "",
                                  " - " + w["detail"] if w.get("detail") else ""))
